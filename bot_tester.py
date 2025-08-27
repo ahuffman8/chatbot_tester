@@ -8,37 +8,21 @@ from datetime import datetime
 
 # Page configuration
 st.set_page_config(
-    page_title="Bot Query Tool",
+    page_title="Strategy Bot Query Tool",
     page_icon="🤖",
     layout="wide"
 )
 
-# Get GitHub repository information
-github_username = "YOUR_GITHUB_USERNAME"  # Replace with your GitHub username
-github_repo = "YOUR_REPO_NAME"            # Replace with your repo name
-branch = "main"                           # Or whatever branch you're using
+# App title and description
+st.title("Strategy Bot Query Tool")
 
-# Define image URLs (raw GitHub content)
-logo_url = f"https://raw.githubusercontent.com/{github_username}/{github_repo}/{branch}/logo.png"
-header_image_url = f"https://raw.githubusercontent.com/{github_username}/{github_repo}/{branch}/header.png"
-
-# Display header image
-try:
-    st.image(header_image_url, use_column_width=True)
-except Exception as e:
-    st.warning(f"Could not load header image: {str(e)}")
-
-# App title with logo in columns
-col1, col2 = st.columns([1, 5])
-with col1:
-    try:
-        st.image(logo_url, width=100)
-    except Exception as e:
-        st.warning(f"Could not load logo: {str(e)}")
-        
-with col2:
-    st.title("Bot Query Tool")
-    st.write("Run questions against your bot and collect answers with SQL queries")
+# Instructions
+st.markdown("""
+Use this site to send multiple queries to a bot and test for accuracy. Add your bot information and credentials, 
+then attach a CSV file with all the questions you want to ask and then click "Run Queries". 
+We'll let you know how long the process will take and then when you come back you'll be able to 
+download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
+""")
 
 # Create columns for inputs
 input_col1, input_col2 = st.columns(2)
@@ -340,7 +324,7 @@ if uploaded_file is not None:
                 if results_df is not None:
                     # Display results
                     st.subheader("Results")
-                    st.dataframe(results_df)
+                    st.dataframe(results_df, use_container_width=True)
                     
                     # Generate CSV file for download
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -360,10 +344,3 @@ if uploaded_file is not None:
         st.error("No questions found in the CSV file. Please make sure the file contains questions.")
 else:
     st.info("Please upload a CSV file with questions to continue.")
-
-# Footer with images
-st.markdown("---")
-footer_col1, footer_col2, footer_col3 = st.columns([1, 2, 1])
-
-with footer_col2:
-    st.write("© 2025 Bot Query Tool")
