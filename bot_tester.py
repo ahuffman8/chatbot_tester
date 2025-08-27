@@ -121,7 +121,7 @@ class ChatbotClient:
         
         return interpretation, sql
 
-# Parse the CSV file to extract questions
+# Parse the CSV file to extract questions - FIX: Handle first line properly
 def parse_questions_from_csv(file):
     questions = []
     
@@ -129,21 +129,42 @@ def parse_questions_from_csv(file):
     file.seek(0)
     
     try:
-        # Try reading as CSV
-        csv_data = pd.read_csv(file)
+        # First, try reading as a simple CSV without assuming headers
+        csv_reader = csv.reader(file)
+        rows = list(csv_reader)
         
-        # Check if there's a column that looks like questions
-        for col in csv_data.columns:
-            if col.lower() in ["question", "questions", "query", "queries"]:
-                questions = csv_data[col].dropna().tolist()
-                break
-        
-        # If no specific question column found, take the first column
-        if not questions and len(csv_data.columns) > 0:
-            questions = csv_data.iloc[:, 0].dropna().tolist()
+        # If we have at least one row
+        if rows:
+            # Check if the first row looks like a header
+            first_row = rows[0]
+            possible_headers = ["question", "questions", "query", "queries"]
+            header_index = -1
             
+            for i, cell in enumerate(first_row):
+                if cell.lower() in possible_headers:
+                    header_index = i
+                    break
+                    
+            # If we found a header, use that column from row 1 onwards
+            if header_index >= 0:
+                for row in rows[1:]:
+                    if len(row) > header_index and row[header_index].strip():
+                        questions.append(row[header_index].strip())
+            else:
+                # No header found, assume first column has questions including first row
+                for row in rows:
+                    if row and row[0].strip():
+                        questions.append(row[0].strip())
+                        
     except Exception as e:
         st.error(f"Error reading CSV file: {str(e)}")
+        # If CSV reading fails, try pandas as fallback
+        try:
+            file.seek(0)
+            csv_data = pd.read_csv(file, header=None)
+            questions = csv_data[0].dropna().tolist()
+        except Exception as inner_e:
+            st.error(f"Fallback CSV reading also failed: {str(inner_e)}")
     
     return questions
 
@@ -237,6 +258,16 @@ def run_queries(questions_list):
     
     return results_df
 
+# Function to create a downloadable CSV instead of Excel to avoid openpyxl dependency
+def create_download_csv(df):
+    # Create a CSV string from the DataFrame
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
+    csv_string = csv_buffer.getvalue()
+    
+    # Return the CSV data
+    return csv_string
+
 # Main app logic
 if uploaded_file is not None:
     # Parse questions from the uploaded CSV
@@ -266,21 +297,18 @@ if uploaded_file is not None:
                     st.subheader("Results")
                     st.dataframe(results_df)
                     
-                    # Generate Excel file in memory
-                    excel_buffer = io.BytesIO()
-                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                        results_df.to_excel(writer, sheet_name='Bot Queries', index=False)
-                    excel_buffer.seek(0)
-                    
-                    # Create download button for Excel
+                    # Generate CSV file for download (avoiding Excel to fix openpyxl dependency issues)
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    csv_data = create_download_csv(results_df)
+                    
+                    # Create download button for CSV
                     st.download_button(
-                        label="Download Excel Results",
-                        data=excel_buffer,
-                        file_name=f"bot_queries_{timestamp}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        label="Download CSV Results",
+                        data=csv_data,
+                        file_name=f"bot_queries_{timestamp}.csv",
+                        mime="text/csv"
                     )
     else:
-        st.error("No questions found in the CSV file. Please make sure the file contains a column with questions.")
+        st.error("No questions found in the CSV file. Please make sure the file contains questions.")
 else:
     st.info("Please upload a CSV file with questions to continue.")
