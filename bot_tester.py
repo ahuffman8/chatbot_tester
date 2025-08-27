@@ -13,21 +13,44 @@ st.set_page_config(
     layout="wide"
 )
 
-# App title
-st.title("Bot Query Tool")
-st.write("Run questions against your bot and collect answers with SQL queries")
+# Get GitHub repository information
+github_username = "YOUR_GITHUB_USERNAME"  # Replace with your GitHub username
+github_repo = "YOUR_REPO_NAME"            # Replace with your repo name
+branch = "main"                           # Or whatever branch you're using
+
+# Define image URLs (raw GitHub content)
+logo_url = f"https://raw.githubusercontent.com/{github_username}/{github_repo}/{branch}/logo.png"
+header_image_url = f"https://raw.githubusercontent.com/{github_username}/{github_repo}/{branch}/header.png"
+
+# Display header image
+try:
+    st.image(header_image_url, use_column_width=True)
+except Exception as e:
+    st.warning(f"Could not load header image: {str(e)}")
+
+# App title with logo in columns
+col1, col2 = st.columns([1, 5])
+with col1:
+    try:
+        st.image(logo_url, width=100)
+    except Exception as e:
+        st.warning(f"Could not load logo: {str(e)}")
+        
+with col2:
+    st.title("Bot Query Tool")
+    st.write("Run questions against your bot and collect answers with SQL queries")
 
 # Create columns for inputs
-col1, col2 = st.columns(2)
+input_col1, input_col2 = st.columns(2)
 
-with col1:
+with input_col1:
     # API Connection Settings
     st.subheader("Connection Settings")
     base_url = st.text_input("Base URL", value="https://autotrial.microstrategy.com/MicroStrategyLibrary")
     project_id = st.text_input("Project ID", value="205BABE083484404399FBBA37BAA874A")
     bot_id = st.text_input("Bot ID", value="1DC776FB20744B85AFEE148D7C11C842")
 
-with col2:
+with input_col2:
     # Authentication
     st.subheader("Authentication")
     username = st.text_input("Username")
@@ -121,7 +144,7 @@ class ChatbotClient:
         
         return interpretation, sql
 
-# Parse the CSV file to extract questions - FIX: Handle first line properly
+# Parse the CSV file to extract questions
 def parse_questions_from_csv(file):
     questions = []
     
@@ -258,7 +281,7 @@ def run_queries(questions_list):
     
     return results_df
 
-# Function to create a downloadable CSV instead of Excel to avoid openpyxl dependency
+# Function to create a downloadable CSV
 def create_download_csv(df):
     # Create a CSV string from the DataFrame
     csv_buffer = io.StringIO()
@@ -267,6 +290,28 @@ def create_download_csv(df):
     
     # Return the CSV data
     return csv_string
+
+# Add custom CSS styling for your interface
+st.markdown("""
+<style>
+    .stButton > button {
+        background-color: #4CAF50;
+        color: white;
+        font-size: 18px;
+        padding: 10px 24px;
+        border-radius: 8px;
+    }
+    .stButton > button:hover {
+        background-color: #45a049;
+    }
+    .download-btn {
+        background-color: #008CBA;
+    }
+    .stProgress > div > div {
+        background-color: #4CAF50;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # Main app logic
 if uploaded_file is not None:
@@ -284,8 +329,8 @@ if uploaded_file is not None:
             if len(questions_list) > 5:
                 st.write("...")
         
-        # Run button
-        if st.button("Run Queries"):
+        # Run button with custom styling
+        if st.button("▶️ Run Queries", key="run_btn"):
             if not username or not password:
                 st.error("Please enter your username and password")
             else:
@@ -297,18 +342,28 @@ if uploaded_file is not None:
                     st.subheader("Results")
                     st.dataframe(results_df)
                     
-                    # Generate CSV file for download (avoiding Excel to fix openpyxl dependency issues)
+                    # Generate CSV file for download
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     csv_data = create_download_csv(results_df)
                     
-                    # Create download button for CSV
+                    # Create download button for CSV with custom styling
+                    st.markdown('<div class="download-section">', unsafe_allow_html=True)
                     st.download_button(
-                        label="Download CSV Results",
+                        label="📥 Download CSV Results",
                         data=csv_data,
                         file_name=f"bot_queries_{timestamp}.csv",
-                        mime="text/csv"
+                        mime="text/csv",
+                        key="download_btn"
                     )
+                    st.markdown('</div>', unsafe_allow_html=True)
     else:
         st.error("No questions found in the CSV file. Please make sure the file contains questions.")
 else:
     st.info("Please upload a CSV file with questions to continue.")
+
+# Footer with images
+st.markdown("---")
+footer_col1, footer_col2, footer_col3 = st.columns([1, 2, 1])
+
+with footer_col2:
+    st.write("© 2025 Bot Query Tool")
