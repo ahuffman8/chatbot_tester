@@ -1,11 +1,43 @@
+import streamlit as st
+import pandas as pd
 import requests
 import time
-import json
-import os
-import pandas as pd
+import io
+import csv
 from datetime import datetime
 
+# Page configuration
+st.set_page_config(
+    page_title="Bot Query Tool",
+    page_icon="🤖",
+    layout="wide"
+)
 
+# App title
+st.title("Bot Query Tool")
+st.write("Run questions against your bot and collect answers with SQL queries")
+
+# Create columns for inputs
+col1, col2 = st.columns(2)
+
+with col1:
+    # API Connection Settings
+    st.subheader("Connection Settings")
+    base_url = st.text_input("Base URL", value="https://autotrial.microstrategy.com/MicroStrategyLibrary")
+    project_id = st.text_input("Project ID", value="205BABE083484404399FBBA37BAA874A")
+    bot_id = st.text_input("Bot ID", value="1DC776FB20744B85AFEE148D7C11C842")
+
+with col2:
+    # Authentication
+    st.subheader("Authentication")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    
+    # File upload
+    st.subheader("Questions File")
+    uploaded_file = st.file_uploader("Upload CSV file with questions", type="csv")
+
+# Chatbot client class
 class ChatbotClient:
     def __init__(self, base_url, bot_id, project_id):
         self.base_url = base_url
@@ -13,28 +45,24 @@ class ChatbotClient:
         self.project_id = project_id
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
-
+        
     def login(self, username, password):
         """Authenticate and store token in session headers"""
-        print("Logging in...")
         url = f"{self.base_url}/api/auth/login"
         payload = {
             "username": username,
             "password": password
         }
-
+        
         response = self.session.post(url, json=payload)
-        try:
-            response.raise_for_status()  # Will throw error for non-204 status
-            print("Login successful")
-        except requests.exceptions.HTTPError as e:
-            print(f"Login failed: {e}")
-            exit(1)
-
+        response.raise_for_status()
+        
         # Extract token from headers
         auth_token = response.headers.get("X-MSTR-AuthToken")
         if auth_token:
             self.session.headers.update({"X-MSTR-AuthToken": auth_token})
+            return True
+        return False
 
     def submit_question(self, question_text):
         """Submit new question and return question ID"""
@@ -50,13 +78,10 @@ class ChatbotClient:
                 "id": self.bot_id,
                 "projectId": self.project_id
             }],
-            "history": []  # No history needed
+            "history": []
         }
 
         response = self.session.post(url, headers=headers, json=payload)
-        if response.status_code == 401:
-            self.login(*CREDS)
-            response = self.session.post(url, headers=headers, json=payload)
         response.raise_for_status()
         return response.json()["id"]
 
@@ -67,162 +92,195 @@ class ChatbotClient:
 
         while (time.time() - start_time) < timeout:
             response = self.session.get(url)
-            if response.status_code == 401:
-                self.login(*CREDS)
-                response = self.session.get(url)
-
             if response.status_code == 200:
-                return response.json(), time.time() - start_time  # Return response and time taken
+                return response.json(), time.time() - start_time
             elif response.status_code != 202:
                 response.raise_for_status()
 
             time.sleep(interval)
 
         raise TimeoutError("Polling timed out after 5 minutes")
-
+        
     def extract_interpretation_and_sql(self, response_data):
-        """
-        Extract both interpretation text and SQL queries from the response
-        """
+        """Extract both interpretation text and SQL queries from the response"""
         interpretation = ""
         sql = ""
-
-        # Get SQL from sqlQueries field
+        
         if "answers" in response_data and len(response_data["answers"]) > 0:
             answer = response_data["answers"][0]
-
+            
             # Extract SQL queries
             if "sqlQueries" in answer and len(answer["sqlQueries"]) > 0:
                 sql = answer["sqlQueries"][0]
-
+            
             # Extract interpretation from queries
             if "queries" in answer and len(answer["queries"]) > 0:
                 query = answer["queries"][0]
                 if "explanation" in query:
                     interpretation = query["explanation"]
-
+        
         return interpretation, sql
 
+# Parse the CSV file to extract questions
+def parse_questions_from_csv(file):
+    questions = []
+    
+    # Reset file pointer to beginning
+    file.seek(0)
+    
+    try:
+        # Try reading as CSV
+        csv_data = pd.read_csv(file)
+        
+        # Check if there's a column that looks like questions
+        for col in csv_data.columns:
+            if col.lower() in ["question", "questions", "query", "queries"]:
+                questions = csv_data[col].dropna().tolist()
+                break
+        
+        # If no specific question column found, take the first column
+        if not questions and len(csv_data.columns) > 0:
+            questions = csv_data.iloc[:, 0].dropna().tolist()
+            
+    except Exception as e:
+        st.error(f"Error reading CSV file: {str(e)}")
+    
+    return questions
 
-if __name__ == "__main__":
-    # Configuration - replace with actual values
-    BASE_URL = "https://autotrial.microstrategy.com/MicroStrategyLibrary"
-    BOT_ID = "1DC776FB20744B85AFEE148D7C11C842"
-    PROJECT_ID = "205BABE083484404399FBBA37BAA874A"
-    CREDS = ("skytouch_ahuffman", "4%PAafAM6kdp")
-
-    # Output file name (Excel)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    EXCEL_FILE = f"bot_queries_{timestamp}.xlsx"
-
-    # List of questions to ask automatically
-    QUESTIONS_LIST = [
-        "What is the ABV of wines from Brazil?",
-        "What types of wine pair well with fish?",
-        "Which wine types have the highest average rating?",
-        "What are the top 5 wines by Acidity?",
-        "What is the difference between a French wine and a Portuguese wine?",
-        "Which country produces the most Merlot?",
-        "What attributes are available in the dataset?",
-        "Give me a list of Chardonnays from the United Sates including their body and average rating.",
-        "What types of grapes generally produce higher ABV?",
-        "How many wines are produced by the Amaranta winery?",
-        "Which wines from Amaranta have the highest ABV?",
-        "Give me the top 10 American Cabernet Sauvignons by average rating.",
-        "Show me a ring chart of all wines broken by grape variety."
-    ]
-
-    # Create a data frame to store results
+# Run queries function
+def run_queries(questions_list):
+    # Create results DataFrame
     results_df = pd.DataFrame(columns=[
-        "Question",
-        "Answer",
-        "Interpretation",
-        "SQL",
+        "Question", 
+        "Answer", 
+        "Interpretation", 
+        "SQL", 
         "Response Time (seconds)"
     ])
-
-    # Create a directory for storing response data (if needed)
-    os.makedirs("response_data", exist_ok=True)
-
-    # Sample execution flow
-    client = ChatbotClient(BASE_URL, BOT_ID, PROJECT_ID)
-
-    # 1. Login
-    client.login(*CREDS)
-
-    # 2. Calculate and display estimated runtime
-    delay_between_questions = 20  # seconds
-    estimated_runtime = len(QUESTIONS_LIST) * (
-                delay_between_questions + 10)  # Adding 10 seconds per question for processing
-    estimated_minutes = estimated_runtime / 60
-
-    print(f"Estimated runtime: {estimated_minutes:.1f} minutes for {len(QUESTIONS_LIST)} questions")
-    print(f"Results will be saved to {EXCEL_FILE}")
-    print("-" * 50)
-
-    # 3. Loop through predefined questions
-    for i, question_text in enumerate(QUESTIONS_LIST):
-        print(f"Processing question {i + 1}/{len(QUESTIONS_LIST)}: {question_text}")
-
+    
+    # Initialize client
+    client = ChatbotClient(base_url, bot_id, project_id)
+    
+    # Login
+    with st.spinner("Logging in..."):
         try:
-            # Submit question and record start time
-            start_time = time.time()
-            question_id = client.submit_question(question_text)
-
-            # Poll for results
+            login_success = client.login(username, password)
+            if not login_success:
+                st.error("Login failed. Please check your credentials.")
+                return None
+        except Exception as e:
+            st.error(f"Login error: {str(e)}")
+            return None
+    
+    st.success("Login successful!")
+    
+    # Create progress elements
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # Calculate estimated time (20 seconds delay + ~15 seconds response time)
+    total_questions = len(questions_list)
+    delay_between_questions = 20
+    estimated_time = total_questions * (delay_between_questions + 15)
+    st.info(f"Estimated time: {estimated_time//60} minutes {estimated_time%60} seconds")
+    
+    # Process each question
+    for i, question in enumerate(questions_list):
+        # Update progress
+        progress = int((i / total_questions) * 100)
+        progress_bar.progress(progress)
+        status_text.text(f"Processing question {i+1}/{total_questions}: {question}")
+        
+        try:
+            # Submit question
+            question_id = client.submit_question(question)
+            
+            # Poll for answer
             result, response_time = client.poll_answer(question_id)
-
-            # Get answer text
-            answer_text = result["answers"][0]["text"] if "answers" in result and len(
-                result["answers"]) > 0 else "No answer provided"
-
-            # Extract interpretation and SQL
+            
+            # Extract data
+            answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
             interpretation, sql = client.extract_interpretation_and_sql(result)
-
-            # Add to dataframe
+            
+            # Add to DataFrame
             results_df.loc[len(results_df)] = [
-                question_text,
+                question,
                 answer_text,
                 interpretation,
                 sql,
                 round(response_time, 2)
             ]
-
-            print(f"  ✓ Got answer in {response_time:.2f} seconds")
-
+            
+            # Show intermediate result
+            st.success(f"✓ Got answer for question {i+1} in {response_time:.2f} seconds")
+            
         except Exception as e:
-            print(f"  ✗ Error: {str(e)}")
-            # Add error entry to dataframe
+            st.error(f"Error processing question {i+1}: {str(e)}")
+            
+            # Add error to DataFrame
             results_df.loc[len(results_df)] = [
-                question_text,
+                question,
                 f"ERROR: {str(e)}",
                 "",
                 "",
                 0
             ]
-
-        # Add a delay between questions to avoid overwhelming the API
-        if i < len(QUESTIONS_LIST) - 1:  # No need to delay after the last question
-            print(f"  Waiting {delay_between_questions} seconds before next question...")
+        
+        # Delay before next question
+        if i < total_questions - 1:
+            status_text.text(f"Waiting {delay_between_questions} seconds before next question...")
             time.sleep(delay_between_questions)
+    
+    # Update progress to 100%
+    progress_bar.progress(100)
+    status_text.text("All questions processed!")
+    
+    return results_df
 
-    # Save results to Excel
-    print("-" * 50)
-    print(f"Saving results to {EXCEL_FILE}...")
-
-    # Format the Excel file
-    with pd.ExcelWriter(EXCEL_FILE, engine='openpyxl') as writer:
-        results_df.to_excel(writer, sheet_name='Bot Queries', index=False)
-
-        # Auto-adjust column widths
-        worksheet = writer.sheets['Bot Queries']
-        for i, col in enumerate(results_df.columns):
-            max_length = max(
-                results_df[col].astype(str).map(len).max(),
-                len(col)
-            )
-            # Limiting width to avoid extremely wide columns
-            adjusted_width = min(max_length + 2, 100)
-            worksheet.column_dimensions[chr(65 + i)].width = adjusted_width
-
-    print(f"Done! Results saved to {EXCEL_FILE}")
+# Main app logic
+if uploaded_file is not None:
+    # Parse questions from the uploaded CSV
+    questions_list = parse_questions_from_csv(uploaded_file)
+    
+    if questions_list:
+        st.write(f"Found {len(questions_list)} questions in the CSV file")
+        
+        # Show first few questions
+        if len(questions_list) > 0:
+            st.subheader("Sample Questions:")
+            for i, q in enumerate(questions_list[:5]):
+                st.write(f"{i+1}. {q}")
+            if len(questions_list) > 5:
+                st.write("...")
+        
+        # Run button
+        if st.button("Run Queries"):
+            if not username or not password:
+                st.error("Please enter your username and password")
+            else:
+                # Run queries and get results
+                results_df = run_queries(questions_list)
+                
+                if results_df is not None:
+                    # Display results
+                    st.subheader("Results")
+                    st.dataframe(results_df)
+                    
+                    # Generate Excel file in memory
+                    excel_buffer = io.BytesIO()
+                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                        results_df.to_excel(writer, sheet_name='Bot Queries', index=False)
+                    excel_buffer.seek(0)
+                    
+                    # Create download button for Excel
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    st.download_button(
+                        label="Download Excel Results",
+                        data=excel_buffer,
+                        file_name=f"bot_queries_{timestamp}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+    else:
+        st.error("No questions found in the CSV file. Please make sure the file contains a column with questions.")
+else:
+    st.info("Please upload a CSV file with questions to continue.")
