@@ -40,9 +40,9 @@ with input_col2:
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
     
-    # File upload - CSV only
+    # File upload
     st.subheader("Questions File")
-    uploaded_file = st.file_uploader("Upload CSV file with questions", type=["csv"])
+    uploaded_file = st.file_uploader("Upload CSV file with questions", type="csv")
 
 # Chatbot client class
 class ChatbotClient:
@@ -93,28 +93,17 @@ class ChatbotClient:
         return response.json()["id"]
 
     def poll_answer(self, question_id, timeout=300, interval=1):
-        """Most basic polling method - just wait for completion"""
+        """Poll for answer until ready or timeout"""
         start_time = time.time()
         url = f"{self.base_url}/api/questions/{question_id}"
-        
+
         while (time.time() - start_time) < timeout:
-            try:
-                response = self.session.get(url)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    
-                    # Check if the response is complete
-                    if "answers" in data and len(data["answers"]) > 0 and "status" in data["answers"][0] and data["answers"][0]["status"] == "completed":
-                        return data, time.time() - start_time
-                
-                elif response.status_code != 202:
-                    response.raise_for_status()
-                    
-            except Exception as e:
-                print(f"Error while polling: {str(e)}")
-                # Continue polling despite errors
-            
+            response = self.session.get(url)
+            if response.status_code == 200:
+                return response.json(), time.time() - start_time
+            elif response.status_code != 202:
+                response.raise_for_status()
+
             time.sleep(interval)
 
         raise TimeoutError("Polling timed out after 5 minutes")
@@ -139,24 +128,50 @@ class ChatbotClient:
         
         return interpretation, sql
 
-# Parse questions from CSV file
+# Parse the CSV file to extract questions
 def parse_questions_from_csv(file):
     questions = []
     
+    # Reset file pointer to beginning
+    file.seek(0)
+    
     try:
-        # First try using pandas (more reliable)
-        df = pd.read_csv(file)
-        # Take first column
-        if len(df.columns) > 0:
-            questions = df.iloc[:, 0].dropna().tolist()
+        # First, try reading as a simple CSV without assuming headers
+        csv_reader = csv.reader(file)
+        rows = list(csv_reader)
+        
+        # If we have at least one row
+        if rows:
+            # Check if the first row looks like a header
+            first_row = rows[0]
+            possible_headers = ["question", "questions", "query", "queries"]
+            header_index = -1
+            
+            for i, cell in enumerate(first_row):
+                if cell.lower() in possible_headers:
+                    header_index = i
+                    break
+                    
+            # If we found a header, use that column from row 1 onwards
+            if header_index >= 0:
+                for row in rows[1:]:
+                    if len(row) > header_index and row[header_index].strip():
+                        questions.append(row[header_index].strip())
+            else:
+                # No header found, assume first column has questions including first row
+                for row in rows:
+                    if row and row[0].strip():
+                        questions.append(row[0].strip())
+                        
     except Exception as e:
-        # Fallback to basic CSV reading
-        file.seek(0)
+        st.error(f"Error reading CSV file: {str(e)}")
+        # If CSV reading fails, try pandas as fallback
         try:
-            csv_data = csv.reader(io.StringIO(file.getvalue().decode('utf-8')))
-            questions = [row[0] for row in csv_data if row and row[0].strip()]
+            file.seek(0)
+            csv_data = pd.read_csv(file, header=None)
+            questions = csv_data[0].dropna().tolist()
         except Exception as inner_e:
-            st.error(f"Error parsing CSV: {str(inner_e)}")
+            st.error(f"Fallback CSV reading also failed: {str(inner_e)}")
     
     return questions
 
@@ -168,10 +183,7 @@ def run_queries(questions_list):
         "Answer", 
         "Interpretation", 
         "SQL", 
-        "Response Time (seconds)",
-        "Question Difficulty (1-5)",
-        "Pass/Fail",
-        "Answer Accuracy (1-5)"
+        "Response Time (seconds)"
     ])
     
     # Initialize client
@@ -224,10 +236,7 @@ def run_queries(questions_list):
                 answer_text,
                 interpretation,
                 sql,
-                round(response_time, 2),
-                "",  # Question Difficulty - left empty for user to fill
-                "",  # Pass/Fail - left empty for user to fill
-                ""   # Answer Accuracy - left empty for user to fill
+                round(response_time, 2)
             ]
             
             # Show intermediate result
@@ -236,16 +245,13 @@ def run_queries(questions_list):
         except Exception as e:
             st.error(f"Error processing question {i+1}: {str(e)}")
             
-            # Add error to DataFrame with empty assessment columns
+            # Add error to DataFrame
             results_df.loc[len(results_df)] = [
                 question,
                 f"ERROR: {str(e)}",
                 "",
                 "",
-                0,
-                "",  # Question Difficulty
-                "Fail",  # Auto-fill as fail since there was an error
-                ""   # Answer Accuracy
+                0
             ]
         
         # Delay before next question
@@ -269,7 +275,7 @@ def create_download_csv(df):
     # Return the CSV data
     return csv_string
 
-# Add custom CSS styling for your interface, including positioned run button
+# Add custom CSS styling for your interface
 st.markdown("""
 <style>
     .stButton > button {
@@ -288,37 +294,16 @@ st.markdown("""
     .stProgress > div > div {
         background-color: #4CAF50;
     }
-    
-    /* Fixed position run button container */
-    .fixed-run-button {
-        position: fixed;
-        bottom: 20px;
-        right: 20px;
-        z-index: 100;
-    }
-    
-    /* Make the button larger and more prominent */
-    .fixed-run-button button {
-        font-size: 20px !important;
-        padding: 12px 28px !important;
-        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
-    }
-    
-    /* Add a small animation on hover */
-    .fixed-run-button button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 6px 12px rgba(0,0,0,0.3);
-    }
 </style>
 """, unsafe_allow_html=True)
 
 # Main app logic
 if uploaded_file is not None:
-    # Parse questions from CSV file
+    # Parse questions from the uploaded CSV
     questions_list = parse_questions_from_csv(uploaded_file)
     
     if questions_list:
-        st.write(f"Found {len(questions_list)} questions in the uploaded file")
+        st.write(f"Found {len(questions_list)} questions in the CSV file")
         
         # Show first few questions
         if len(questions_list) > 0:
@@ -328,54 +313,34 @@ if uploaded_file is not None:
             if len(questions_list) > 5:
                 st.write("...")
         
-        # Create results display area (will be populated after running queries)
-        results_container = st.container()
-        
-        # Add spacer to ensure content isn't hidden behind the fixed button
-        st.markdown("<div style='height: 100px;'></div>", unsafe_allow_html=True)
+        # Run button with custom styling
+        if st.button("▶️ Run Queries", key="run_btn"):
+            if not username or not password:
+                st.error("Please enter your username and password")
+            else:
+                # Run queries and get results
+                results_df = run_queries(questions_list)
+                
+                if results_df is not None:
+                    # Display results
+                    st.subheader("Results")
+                    st.dataframe(results_df, use_container_width=True)
+                    
+                    # Generate CSV file for download
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    csv_data = create_download_csv(results_df)
+                    
+                    # Create download button for CSV with custom styling
+                    st.markdown('<div class="download-section">', unsafe_allow_html=True)
+                    st.download_button(
+                        label="📥 Download CSV Results",
+                        data=csv_data,
+                        file_name=f"bot_queries_{timestamp}.csv",
+                        mime="text/csv",
+                        key="download_btn"
+                    )
+                    st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.error("No questions found in the CSV file. Please make sure the file contains questions.")
 else:
     st.info("Please upload a CSV file with questions to continue.")
-    questions_list = []
-
-# Fixed position run button at the bottom right
-# This is outside the if-block so it's always shown, but disabled if no file is uploaded
-st.markdown('<div class="fixed-run-button">', unsafe_allow_html=True)
-run_button_clicked = st.button(
-    "▶️ Run Queries", 
-    key="run_btn", 
-    disabled=(not questions_list or not uploaded_file)
-)
-st.markdown('</div>', unsafe_allow_html=True)
-
-# Handle button click - this needs to be outside the HTML/CSS elements
-if run_button_clicked:
-    if not username or not password:
-        st.error("Please enter your username and password")
-    else:
-        # Run queries and get results
-        results_df = run_queries(questions_list)
-        
-        if results_df is not None:
-            # Display results (hide assessment columns in the display)
-            display_df = results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
-            with results_container:
-                st.subheader("Results")
-                st.dataframe(display_df, use_container_width=True)
-                
-                # Generate CSV file for download (includes all columns)
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                csv_data = create_download_csv(results_df)
-                
-                # Create download button for CSV with custom styling
-                st.markdown('<div class="download-section">', unsafe_allow_html=True)
-                st.download_button(
-                    label="📥 Download CSV Results (includes assessment columns)",
-                    data=csv_data,
-                    file_name=f"bot_queries_{timestamp}.csv",
-                    mime="text/csv",
-                    key="download_btn"
-                )
-                st.markdown('</div>', unsafe_allow_html=True)
-                
-                # Add note about assessment columns
-                st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
