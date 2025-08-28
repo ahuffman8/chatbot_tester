@@ -13,6 +13,9 @@ st.set_page_config(
     layout="wide"
 )
 
+# Constants - Fixed AI writing speed (characters per second)
+AI_WRITING_SPEED = 25  # This is a reasonable estimate for LLM generation speed
+
 # App title and description
 st.title("Strategy Bot Query Tool")
 
@@ -88,9 +91,10 @@ class ChatbotClient:
             "history": []
         }
 
+        start_time = time.time()
         response = self.session.post(url, headers=headers, json=payload)
         response.raise_for_status()
-        return response.json()["id"]
+        return response.json()["id"], time.time() - start_time
 
     def poll_answer(self, question_id, timeout=300, interval=1):
         """Poll for answer until ready or timeout"""
@@ -100,7 +104,8 @@ class ChatbotClient:
         while (time.time() - start_time) < timeout:
             response = self.session.get(url)
             if response.status_code == 200:
-                return response.json(), time.time() - start_time
+                api_response_time = time.time() - start_time
+                return response.json(), api_response_time
             elif response.status_code != 202:
                 response.raise_for_status()
 
@@ -175,6 +180,13 @@ def parse_questions_from_csv(file):
     
     return questions
 
+# Calculate estimated writing time based on text length
+def calculate_writing_time(text):
+    """Estimate how long it would take an AI to write a text based on length"""
+    if not text:
+        return 0.0
+    return len(text) / AI_WRITING_SPEED
+
 # Run queries function
 def run_queries(questions_list):
     # Create results DataFrame
@@ -183,7 +195,9 @@ def run_queries(questions_list):
         "Answer", 
         "Interpretation", 
         "SQL", 
-        "Response Time (seconds)"
+        "Total Response Time (seconds)",
+        "API Response Time (seconds)",
+        "Estimated Writing Time (seconds)"
     ])
     
     # Initialize client
@@ -220,15 +234,24 @@ def run_queries(questions_list):
         status_text.text(f"Processing question {i+1}/{total_questions}: {question}")
         
         try:
+            # Start total time measurement
+            total_start_time = time.time()
+            
             # Submit question
-            question_id = client.submit_question(question)
+            question_id, submit_time = client.submit_question(question)
             
             # Poll for answer
-            result, response_time = client.poll_answer(question_id)
+            result, api_response_time = client.poll_answer(question_id)
+            
+            # Calculate total processing time
+            total_time = time.time() - total_start_time
             
             # Extract data
             answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
             interpretation, sql = client.extract_interpretation_and_sql(result)
+            
+            # Calculate estimated writing time
+            writing_time = calculate_writing_time(answer_text)
             
             # Add to DataFrame
             results_df.loc[len(results_df)] = [
@@ -236,11 +259,13 @@ def run_queries(questions_list):
                 answer_text,
                 interpretation,
                 sql,
-                round(response_time, 2)
+                round(total_time, 2),
+                round(api_response_time, 2),
+                round(writing_time, 2)
             ]
             
             # Show intermediate result
-            st.success(f"✓ Got answer for question {i+1} in {response_time:.2f} seconds")
+            st.success(f"✓ Got answer for question {i+1}. Total time: {total_time:.2f}s, API response: {api_response_time:.2f}s, Est. writing: {writing_time:.2f}s")
             
         except Exception as e:
             st.error(f"Error processing question {i+1}: {str(e)}")
@@ -251,6 +276,8 @@ def run_queries(questions_list):
                 f"ERROR: {str(e)}",
                 "",
                 "",
+                0,
+                0,
                 0
             ]
         
