@@ -117,7 +117,7 @@ class ChatbotClient:
     def poll_answer(self, question_id, timeout=300, interval=1):
         """
         Simple polling method that just waits for completion
-        Returns: (response_data, total_time)
+        Returns: (response_data, total_response_time)
         """
         start_time = time.time()
         url = f"{self.base_url}/api/questions/{question_id}"
@@ -168,24 +168,7 @@ class ChatbotClient:
         
         return interpretation, sql
 
-# Calculate estimated start time based on answer length and AI generation speed
-def calculate_estimated_times(answer_text, total_response_time, chars_per_second):
-    # Get answer length in characters
-    answer_length = len(answer_text)
-    
-    # Calculate estimated time to generate the answer
-    generation_time = answer_length / chars_per_second
-    
-    # Calculate estimated start time (when bot began answering)
-    # If total_response_time < generation_time, use a small value (0.5s) to avoid negative numbers
-    if total_response_time <= generation_time:
-        estimated_start_time = total_response_time - (total_response_time * 0.9)  # Just use 10% of total time
-    else:
-        estimated_start_time = total_response_time - generation_time
-    
-    return estimated_start_time, generation_time
-
-# Parse questions from the uploaded file (now handles Excel with dependency check)
+# Parse questions from the uploaded file (handles Excel with dependency check)
 def parse_questions_from_file(file):
     questions = []
     
@@ -262,6 +245,22 @@ def parse_questions_from_file(file):
     
     return questions
 
+# Calculate estimated times based on answer length and generation speed
+def calculate_estimated_times(answer_text, total_time, chars_per_second):
+    answer_length = len(answer_text)
+    generation_time = answer_length / chars_per_second
+    
+    # Ensure estimated start time is not negative
+    if generation_time >= total_time:
+        # If generation would take longer than the total time,
+        # assume a minimal thinking time (10% of total)
+        estimated_start_time = total_time * 0.1
+        generation_time = total_time * 0.9  # Adjusted generation time
+    else:
+        estimated_start_time = total_time - generation_time
+    
+    return answer_length, estimated_start_time, generation_time
+
 # Run queries function
 def run_queries(questions_list):
     # Create results DataFrame with timing columns
@@ -270,9 +269,9 @@ def run_queries(questions_list):
         "Answer", 
         "Interpretation", 
         "SQL", 
-        "Answer Characters",
+        "Answer Length (chars)",
+        "API Response Time (seconds)",
         "Estimated Start Time (seconds)",
-        "Total Response Time (seconds)",
         "Estimated Generation Time (seconds)",
         "Question Difficulty (1-5)",
         "Pass/Fail",
@@ -316,16 +315,16 @@ def run_queries(questions_list):
             # Submit question
             question_id = client.submit_question(question)
             
-            # Poll for answer
-            result, total_time = client.poll_answer(question_id)
+            # Poll for answer with simplified timing
+            result, api_response_time = client.poll_answer(question_id)
             
             # Extract data
             answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
             interpretation, sql = client.extract_interpretation_and_sql(result)
             
-            # Calculate estimated start time and generation time
-            answer_chars = len(answer_text)
-            estimated_start, generation_time = calculate_estimated_times(answer_text, total_time, ai_speed)
+            # Calculate estimated timing metrics
+            answer_length, estimated_start, generation_time = calculate_estimated_times(
+                answer_text, api_response_time, ai_speed)
             
             # Add to DataFrame with empty assessment columns
             results_df.loc[len(results_df)] = [
@@ -333,9 +332,9 @@ def run_queries(questions_list):
                 answer_text,
                 interpretation,
                 sql,
-                answer_chars,
+                answer_length,
+                round(api_response_time, 2),
                 round(estimated_start, 2),
-                round(total_time, 2),
                 round(generation_time, 2),
                 "",  # Question Difficulty - left empty for user to fill
                 "",  # Pass/Fail - left empty for user to fill
@@ -344,10 +343,10 @@ def run_queries(questions_list):
             
             # Show intermediate result
             st.success(f"""✓ Got answer for question {i+1}:
-            - Answer length: {answer_chars} characters
-            - Estimated start time: {estimated_start:.2f}s
-            - Generation time: {generation_time:.2f}s
-            - Total time: {total_time:.2f}s""")
+            - Answer length: {answer_length} characters
+            - API response time: {api_response_time:.2f}s
+            - Estimated start time: {estimated_start:.2f}s 
+            - Estimated generation time: {generation_time:.2f}s""")
             
         except Exception as e:
             st.error(f"Error processing question {i+1}: {str(e)}")
