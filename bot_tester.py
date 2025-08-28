@@ -94,34 +94,41 @@ class ChatbotClient:
 
     def poll_answer(self, question_id, timeout=300, interval=1):
         """
-        Poll for answer until ready or timeout, tracking both start and completion times
+        Poll for answer with basic first response timing
         Returns: (response_data, time_to_first_response, total_response_time)
         """
         start_time = time.time()
         url = f"{self.base_url}/api/questions/{question_id}"
         first_response_time = None
-        has_partial_answer = False
-
+        
+        # Try to get initial response quickly (shorter intervals)
+        for _ in range(30):  # Try for 3 seconds (30 * 0.1)
+            if time.time() - start_time > timeout:
+                raise TimeoutError("Polling timed out")
+                
+            response = self.session.get(url)
+            
+            # If we get any response with status 200, mark first response time
+            if response.status_code == 200:
+                first_response_time = time.time() - start_time
+                break
+                
+            time.sleep(0.1)
+        
+        # If we still don't have first response time, set it equal to whenever we get the final answer
+        if first_response_time is None:
+            first_response_time = time.time() - start_time
+            
+        # Continue polling until completion
         while (time.time() - start_time) < timeout:
             response = self.session.get(url)
             if response.status_code == 200:
                 data = response.json()
-                
                 # Check if we have a complete answer
                 if "answers" in data and len(data["answers"]) > 0:
-                    if "status" in data["answers"][0] and data["answers"][0]["status"] == "completed":
-                        # If this is our first time seeing a response at all, set first_response_time
-                        if first_response_time is None:
-                            first_response_time = time.time() - start_time
-                        
-                        # Return complete response
-                        return data, first_response_time, time.time() - start_time
-                
-                # Check if we have a partial answer (streaming in progress)
-                if not has_partial_answer and "answers" in data and len(data["answers"]) > 0:
+                    # Consider it complete if it has answer text
                     if "text" in data["answers"][0] and data["answers"][0]["text"]:
-                        has_partial_answer = True
-                        first_response_time = time.time() - start_time
+                        return data, first_response_time, time.time() - start_time
             
             elif response.status_code != 202:
                 response.raise_for_status()
@@ -199,7 +206,7 @@ def parse_questions_from_csv(file):
 
 # Run queries function
 def run_queries(questions_list):
-    # Create results DataFrame with additional columns for timing
+    # Create results DataFrame
     results_df = pd.DataFrame(columns=[
         "Question", 
         "Answer", 
