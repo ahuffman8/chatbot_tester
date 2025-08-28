@@ -19,7 +19,7 @@ st.title("Strategy Bot Query Tool")
 # Instructions
 st.markdown("""
 Use this site to send multiple queries to a bot and test for accuracy. Add your bot information and credentials, 
-then attach a CSV file with all the questions you want to ask and then click "Run Queries". 
+then attach a CSV file with all the questions you want to ask (all questions must be in Column A) and then click "Run Queries". 
 We'll let you know how long the process will take. When you come back you'll be able to 
 download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
 """)
