@@ -18,7 +18,10 @@ st.title("Strategy Bot Query Tool")
 
 # Instructions
 st.markdown("""
-Use this site to send multiple questions to a bot to test for speed and accuracy. Add your bot information and credentials, then attach a CSV file with all the questions you want to ask and then click "Run Queries". We'll let you know how long the process will take and then when you come back you'll be able to download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
+Use this site to send multiple queries to a bot and test for accuracy. Add your bot information and credentials, 
+then attach a CSV file with all the questions you want to ask and then click "Run Queries". 
+We'll let you know how long the process will take and then when you come back you'll be able to 
+download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
 """)
 
 # Create columns for inputs
@@ -206,14 +209,17 @@ def parse_questions_from_csv(file):
 
 # Run queries function
 def run_queries(questions_list):
-    # Create results DataFrame
+    # Create results DataFrame with additional assessment columns
     results_df = pd.DataFrame(columns=[
         "Question", 
         "Answer", 
         "Interpretation", 
         "SQL", 
         "Time to First Response (seconds)",
-        "Total Response Time (seconds)"
+        "Total Response Time (seconds)",
+        "Question Difficulty (1-5)",  # New column
+        "Pass/Fail",                  # New column
+        "Answer Accuracy (1-5)"       # New column
     ])
     
     # Initialize client
@@ -260,14 +266,17 @@ def run_queries(questions_list):
             answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
             interpretation, sql = client.extract_interpretation_and_sql(result)
             
-            # Add to DataFrame
+            # Add to DataFrame with empty assessment columns
             results_df.loc[len(results_df)] = [
                 question,
                 answer_text,
                 interpretation,
                 sql,
                 round(first_response_time, 2),
-                round(total_response_time, 2)
+                round(total_response_time, 2),
+                "",  # Question Difficulty - left empty for user to fill
+                "",  # Pass/Fail - left empty for user to fill
+                ""   # Answer Accuracy - left empty for user to fill
             ]
             
             # Show intermediate result
@@ -276,14 +285,17 @@ def run_queries(questions_list):
         except Exception as e:
             st.error(f"Error processing question {i+1}: {str(e)}")
             
-            # Add error to DataFrame
+            # Add error to DataFrame with empty assessment columns
             results_df.loc[len(results_df)] = [
                 question,
                 f"ERROR: {str(e)}",
                 "",
                 "",
                 0,
-                0
+                0,
+                "",  # Question Difficulty
+                "Fail",  # Auto-fill as fail since there was an error
+                ""   # Answer Accuracy
             ]
         
         # Delay before next question
@@ -354,24 +366,28 @@ if uploaded_file is not None:
                 results_df = run_queries(questions_list)
                 
                 if results_df is not None:
-                    # Display results
+                    # Display results (hide assessment columns in the display)
+                    display_df = results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
                     st.subheader("Results")
-                    st.dataframe(results_df, use_container_width=True)
+                    st.dataframe(display_df, use_container_width=True)
                     
-                    # Generate CSV file for download
+                    # Generate CSV file for download (includes all columns)
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     csv_data = create_download_csv(results_df)
                     
                     # Create download button for CSV with custom styling
                     st.markdown('<div class="download-section">', unsafe_allow_html=True)
                     st.download_button(
-                        label="📥 Download CSV Results",
+                        label="📥 Download CSV Results (includes assessment columns)",
                         data=csv_data,
                         file_name=f"bot_queries_{timestamp}.csv",
                         mime="text/csv",
                         key="download_btn"
                     )
                     st.markdown('</div>', unsafe_allow_html=True)
+                    
+                    # Add note about assessment columns
+                    st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
     else:
         st.error("No questions found in the CSV file. Please make sure the file contains questions.")
 else:
