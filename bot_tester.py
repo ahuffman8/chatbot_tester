@@ -19,8 +19,8 @@ st.title("Strategy Bot Query Tool")
 # Instructions
 st.markdown("""
 Use this site to send multiple queries to a bot and test for accuracy. Add your bot information and credentials, 
-then attach a CSV file with all the questions you want to ask (all questions must be in Column A) and then click "Run Queries". 
-We'll let you know how long the process will take. When you come back you'll be able to 
+then attach a CSV file with all the questions you want to ask and then click "Run Queries". 
+We'll let you know how long the process will take and then when you come back you'll be able to 
 download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
 """)
 
@@ -93,14 +93,36 @@ class ChatbotClient:
         return response.json()["id"]
 
     def poll_answer(self, question_id, timeout=300, interval=1):
-        """Poll for answer until ready or timeout"""
+        """
+        Poll for answer until ready or timeout, tracking both start and completion times
+        Returns: (response_data, time_to_first_response, total_response_time)
+        """
         start_time = time.time()
         url = f"{self.base_url}/api/questions/{question_id}"
+        first_response_time = None
+        has_partial_answer = False
 
         while (time.time() - start_time) < timeout:
             response = self.session.get(url)
             if response.status_code == 200:
-                return response.json(), time.time() - start_time
+                data = response.json()
+                
+                # Check if we have a complete answer
+                if "answers" in data and len(data["answers"]) > 0:
+                    if "status" in data["answers"][0] and data["answers"][0]["status"] == "completed":
+                        # If this is our first time seeing a response at all, set first_response_time
+                        if first_response_time is None:
+                            first_response_time = time.time() - start_time
+                        
+                        # Return complete response
+                        return data, first_response_time, time.time() - start_time
+                
+                # Check if we have a partial answer (streaming in progress)
+                if not has_partial_answer and "answers" in data and len(data["answers"]) > 0:
+                    if "text" in data["answers"][0] and data["answers"][0]["text"]:
+                        has_partial_answer = True
+                        first_response_time = time.time() - start_time
+            
             elif response.status_code != 202:
                 response.raise_for_status()
 
@@ -177,13 +199,14 @@ def parse_questions_from_csv(file):
 
 # Run queries function
 def run_queries(questions_list):
-    # Create results DataFrame
+    # Create results DataFrame with additional columns for timing
     results_df = pd.DataFrame(columns=[
         "Question", 
         "Answer", 
         "Interpretation", 
         "SQL", 
-        "Response Time (seconds)"
+        "Time to First Response (seconds)",
+        "Total Response Time (seconds)"
     ])
     
     # Initialize client
@@ -223,8 +246,8 @@ def run_queries(questions_list):
             # Submit question
             question_id = client.submit_question(question)
             
-            # Poll for answer
-            result, response_time = client.poll_answer(question_id)
+            # Poll for answer with timing information
+            result, first_response_time, total_response_time = client.poll_answer(question_id)
             
             # Extract data
             answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
@@ -236,11 +259,12 @@ def run_queries(questions_list):
                 answer_text,
                 interpretation,
                 sql,
-                round(response_time, 2)
+                round(first_response_time, 2),
+                round(total_response_time, 2)
             ]
             
             # Show intermediate result
-            st.success(f"✓ Got answer for question {i+1} in {response_time:.2f} seconds")
+            st.success(f"✓ Got answer for question {i+1}: First response in {first_response_time:.2f}s, Total time: {total_response_time:.2f}s")
             
         except Exception as e:
             st.error(f"Error processing question {i+1}: {str(e)}")
@@ -251,6 +275,7 @@ def run_queries(questions_list):
                 f"ERROR: {str(e)}",
                 "",
                 "",
+                0,
                 0
             ]
         
