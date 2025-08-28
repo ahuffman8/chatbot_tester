@@ -14,7 +14,7 @@ st.set_page_config(
 )
 
 # Constants
-AI_WRITING_SPEED = 135  # characters per second
+AI_WRITING_SPEED = 100  # characters per second - much faster estimate
 
 # App title and description
 st.title("Strategy Bot Query Tool")
@@ -257,7 +257,7 @@ def run_queries(questions_list):
     # Calculate estimated time (20 seconds delay + ~15 seconds response time)
     total_questions = len(questions_list)
     delay_between_questions = 20
-    estimated_time = total_questions * (delay_between_questions + 5)
+    estimated_time = total_questions * (delay_between_questions + 15)
     st.info(f"Estimated time: {estimated_time//60} minutes {estimated_time%60} seconds")
     
     # Process each question
