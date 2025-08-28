@@ -13,9 +13,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Constants - Fixed AI writing speed (characters per second)
-AI_WRITING_SPEED = 25  # This is a reasonable estimate for LLM generation speed
-
 # App title and description
 st.title("Strategy Bot Query Tool")
 
@@ -91,21 +88,48 @@ class ChatbotClient:
             "history": []
         }
 
-        start_time = time.time()
         response = self.session.post(url, headers=headers, json=payload)
         response.raise_for_status()
-        return response.json()["id"], time.time() - start_time
+        return response.json()["id"]
 
     def poll_answer(self, question_id, timeout=300, interval=1):
-        """Poll for answer until ready or timeout"""
+        """
+        Poll for answer with basic first response timing
+        Returns: (response_data, time_to_first_response, total_response_time)
+        """
         start_time = time.time()
         url = f"{self.base_url}/api/questions/{question_id}"
-
+        first_response_time = None
+        
+        # Try to get initial response quickly (shorter intervals)
+        for _ in range(30):  # Try for 3 seconds (30 * 0.1)
+            if time.time() - start_time > timeout:
+                raise TimeoutError("Polling timed out")
+                
+            response = self.session.get(url)
+            
+            # If we get any response with status 200, mark first response time
+            if response.status_code == 200:
+                first_response_time = time.time() - start_time
+                break
+                
+            time.sleep(0.1)
+        
+        # If we still don't have first response time, set it equal to whenever we get the final answer
+        if first_response_time is None:
+            first_response_time = time.time() - start_time
+            
+        # Continue polling until completion
         while (time.time() - start_time) < timeout:
             response = self.session.get(url)
             if response.status_code == 200:
-                api_response_time = time.time() - start_time
-                return response.json(), api_response_time
+                data = response.json()
+                # Check if we have a complete answer
+                if "answers" in data and len(data["answers"]) > 0:
+                    # Consider it complete if it has answer text
+                    if "text" in data["answers"][0] and data["answers"][0]["text"]:
+                        return data, first_response_time, time.time() - start_time
+            
             elif response.status_code != 202:
                 response.raise_for_status()
 
@@ -133,7 +157,7 @@ class ChatbotClient:
         
         return interpretation, sql
 
-# Parse the CSV file to extract questions
+# Parse the CSV file to extract questions - fixed for binary file handling
 def parse_questions_from_csv(file):
     questions = []
     
@@ -141,8 +165,9 @@ def parse_questions_from_csv(file):
     file.seek(0)
     
     try:
-        # First, try reading as a simple CSV without assuming headers
-        csv_reader = csv.reader(file)
+        # Convert bytes to string for CSV reader
+        text_content = io.TextIOWrapper(file, encoding='utf-8')
+        csv_reader = csv.reader(text_content)
         rows = list(csv_reader)
         
         # If we have at least one row
@@ -173,31 +198,28 @@ def parse_questions_from_csv(file):
         # If CSV reading fails, try pandas as fallback
         try:
             file.seek(0)
-            csv_data = pd.read_csv(file, header=None)
-            questions = csv_data[0].dropna().tolist()
+            csv_data = pd.read_csv(file)  # Pandas handles binary files automatically
+            # If we have at least one column, take the first column
+            if len(csv_data.columns) > 0:
+                questions = csv_data.iloc[:, 0].dropna().tolist()
         except Exception as inner_e:
             st.error(f"Fallback CSV reading also failed: {str(inner_e)}")
     
     return questions
 
-# Calculate estimated writing time based on text length
-def calculate_writing_time(text):
-    """Estimate how long it would take an AI to write a text based on length"""
-    if not text:
-        return 0.0
-    return len(text) / AI_WRITING_SPEED
-
 # Run queries function
 def run_queries(questions_list):
-    # Create results DataFrame
+    # Create results DataFrame with additional assessment columns
     results_df = pd.DataFrame(columns=[
         "Question", 
         "Answer", 
         "Interpretation", 
         "SQL", 
+        "Time to First Response (seconds)",
         "Total Response Time (seconds)",
-        "API Response Time (seconds)",
-        "Estimated Writing Time (seconds)"
+        "Question Difficulty (1-5)",  # New column
+        "Pass/Fail",                  # New column
+        "Answer Accuracy (1-5)"       # New column
     ])
     
     # Initialize client
@@ -234,43 +256,36 @@ def run_queries(questions_list):
         status_text.text(f"Processing question {i+1}/{total_questions}: {question}")
         
         try:
-            # Start total time measurement
-            total_start_time = time.time()
-            
             # Submit question
-            question_id, submit_time = client.submit_question(question)
+            question_id = client.submit_question(question)
             
-            # Poll for answer
-            result, api_response_time = client.poll_answer(question_id)
-            
-            # Calculate total processing time
-            total_time = time.time() - total_start_time
+            # Poll for answer with timing information
+            result, first_response_time, total_response_time = client.poll_answer(question_id)
             
             # Extract data
             answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
             interpretation, sql = client.extract_interpretation_and_sql(result)
             
-            # Calculate estimated writing time
-            writing_time = calculate_writing_time(answer_text)
-            
-            # Add to DataFrame
+            # Add to DataFrame with empty assessment columns
             results_df.loc[len(results_df)] = [
                 question,
                 answer_text,
                 interpretation,
                 sql,
-                round(total_time, 2),
-                round(api_response_time, 2),
-                round(writing_time, 2)
+                round(first_response_time, 2),
+                round(total_response_time, 2),
+                "",  # Question Difficulty - left empty for user to fill
+                "",  # Pass/Fail - left empty for user to fill
+                ""   # Answer Accuracy - left empty for user to fill
             ]
             
             # Show intermediate result
-            st.success(f"✓ Got answer for question {i+1}. Total time: {total_time:.2f}s, API response: {api_response_time:.2f}s, Est. writing: {writing_time:.2f}s")
+            st.success(f"✓ Got answer for question {i+1}: First response in {first_response_time:.2f}s, Total time: {total_response_time:.2f}s")
             
         except Exception as e:
             st.error(f"Error processing question {i+1}: {str(e)}")
             
-            # Add error to DataFrame
+            # Add error to DataFrame with empty assessment columns
             results_df.loc[len(results_df)] = [
                 question,
                 f"ERROR: {str(e)}",
@@ -278,7 +293,9 @@ def run_queries(questions_list):
                 "",
                 0,
                 0,
-                0
+                "",  # Question Difficulty
+                "Fail",  # Auto-fill as fail since there was an error
+                ""   # Answer Accuracy
             ]
         
         # Delay before next question
@@ -349,24 +366,28 @@ if uploaded_file is not None:
                 results_df = run_queries(questions_list)
                 
                 if results_df is not None:
-                    # Display results
+                    # Display results (hide assessment columns in the display)
+                    display_df = results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
                     st.subheader("Results")
-                    st.dataframe(results_df, use_container_width=True)
+                    st.dataframe(display_df, use_container_width=True)
                     
-                    # Generate CSV file for download
+                    # Generate CSV file for download (includes all columns)
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     csv_data = create_download_csv(results_df)
                     
                     # Create download button for CSV with custom styling
                     st.markdown('<div class="download-section">', unsafe_allow_html=True)
                     st.download_button(
-                        label="📥 Download CSV Results",
+                        label="📥 Download CSV Results (includes assessment columns)",
                         data=csv_data,
                         file_name=f"bot_queries_{timestamp}.csv",
                         mime="text/csv",
                         key="download_btn"
                     )
                     st.markdown('</div>', unsafe_allow_html=True)
+                    
+                    # Add note about assessment columns
+                    st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
     else:
         st.error("No questions found in the CSV file. Please make sure the file contains questions.")
 else:
