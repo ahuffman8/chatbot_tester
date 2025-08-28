@@ -106,13 +106,26 @@ class ChatbotClient:
 
     def poll_answer(self, question_id, timeout=300, interval=1):
         """
-        Simplified polling that still tries to detect when meaningful response starts
-        Returns: (response_data, total_response_time)
+        Poll for answer with two time measurements:
+        1. When text first exceeds 50 characters (substantive content)
+        2. When answer is completed
+        
+        Returns: (response_data, time_to_substantive, total_time)
         """
         start_time = time.time()
         url = f"{self.base_url}/api/questions/{question_id}"
         
-        # Simplified polling
+        # Words that indicate processing messages that don't count as substantive
+        processing_phrases = [
+            "analyzing", "gathering", "thinking", "processing", 
+            "please wait", "working on", "searching", "loading"
+        ]
+        
+        min_substantive_length = 50
+        time_to_substantive = None
+        prev_text_length = 0
+        
+        # Simple polling loop
         while (time.time() - start_time) < timeout:
             try:
                 response = self.session.get(url)
@@ -120,23 +133,38 @@ class ChatbotClient:
                 if response.status_code == 200:
                     data = response.json()
                     
-                    # Check if we have a complete answer
-                    if ("answers" in data and len(data["answers"]) > 0 and 
-                        "text" in data["answers"][0] and data["answers"][0]["text"]):
+                    # Check if we have text content
+                    if "answers" in data and len(data["answers"]) > 0 and "text" in data["answers"][0]:
+                        current_text = data["answers"][0]["text"]
+                        current_length = len(current_text)
+                        
+                        # Detect first substantive content (> min_substantive_length chars)
+                        # And ensure it's not just a processing message
+                        if (time_to_substantive is None and 
+                            current_length > min_substantive_length and
+                            current_length > prev_text_length and
+                            not any(phrase.lower() in current_text.lower() for phrase in processing_phrases)):
+                            time_to_substantive = time.time() - start_time
+                        
+                        prev_text_length = current_length
                         
                         # Check if the response is complete
                         if "status" in data["answers"][0] and data["answers"][0]["status"] == "completed":
                             total_time = time.time() - start_time
-                            return data, total_time
+                            
+                            # If we never detected substantive content, use total time
+                            if time_to_substantive is None:
+                                time_to_substantive = total_time
+                                
+                            return data, time_to_substantive, total_time
                 
                 elif response.status_code != 202:
                     response.raise_for_status()
-            
+                    
             except Exception as e:
                 # Log error but continue polling
                 print(f"Error while polling: {str(e)}")
             
-            # Wait before next poll
             time.sleep(interval)
 
         raise TimeoutError("Polling timed out after 5 minutes")
@@ -240,13 +268,14 @@ def parse_questions_from_file(file):
 
 # Run queries function
 def run_queries(questions_list):
-    # Create results DataFrame with simplified columns (no first response time)
+    # Create results DataFrame with timing columns
     results_df = pd.DataFrame(columns=[
         "Question", 
         "Answer", 
         "Interpretation", 
         "SQL", 
-        "Response Time (seconds)",
+        "Time to Substantive Content (seconds)",
+        "Total Response Time (seconds)",
         "Question Difficulty (1-5)",
         "Pass/Fail",
         "Answer Accuracy (1-5)"
@@ -289,8 +318,8 @@ def run_queries(questions_list):
             # Submit question
             question_id = client.submit_question(question)
             
-            # Poll for answer with simplified timing
-            result, total_response_time = client.poll_answer(question_id)
+            # Poll for answer with timing information
+            result, time_to_substantive, total_time = client.poll_answer(question_id)
             
             # Extract data
             answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
@@ -302,14 +331,15 @@ def run_queries(questions_list):
                 answer_text,
                 interpretation,
                 sql,
-                round(total_response_time, 2),
+                round(time_to_substantive, 2),
+                round(total_time, 2),
                 "",  # Question Difficulty - left empty for user to fill
                 "",  # Pass/Fail - left empty for user to fill
                 ""   # Answer Accuracy - left empty for user to fill
             ]
             
             # Show intermediate result
-            st.success(f"✓ Got answer for question {i+1} in {total_response_time:.2f}s")
+            st.success(f"✓ Got answer for question {i+1}: Substantive content in {time_to_substantive:.2f}s, Total time: {total_time:.2f}s")
             
         except Exception as e:
             st.error(f"Error processing question {i+1}: {str(e)}")
@@ -320,6 +350,7 @@ def run_queries(questions_list):
                 f"ERROR: {str(e)}",
                 "",
                 "",
+                0,
                 0,
                 "",  # Question Difficulty
                 "Fail",  # Auto-fill as fail since there was an error
