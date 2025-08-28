@@ -14,17 +14,14 @@ st.set_page_config(
 )
 
 # Constants
-AI_WRITING_SPEED = 100  # characters per second - much faster estimate
+AI_WRITING_SPEED = 130  # characters per second - much faster estimate
 
 # App title and description
 st.title("Strategy Bot Query Tool")
 
 # Instructions
 st.markdown("""
-Use this site to send multiple queries to a bot and test for accuracy. Add your bot information and credentials, 
-then attach a CSV file with all the questions you want to ask and then click "Run Queries". 
-We'll let you know how long the process will take and then when you come back you'll be able to 
-download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
+Use this site to send multiple questions to a bot to test for speed and accuracy. Add your bot information and credentials, then attach a CSV file with all the questions you want to ask and then click "Run Queries". We'll let you know how long the process will take and then when you come back you'll be able to download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
 """)
 
 # Create columns for inputs
@@ -226,9 +223,9 @@ def run_queries(questions_list):
         "Answer", 
         "Interpretation", 
         "SQL", 
-        "Time to First Response (seconds)",
+        "Time to API Response (seconds)",
         "Total Response Time (seconds)",
-        "Estimated Writing Time (seconds)",  # Added new column
+        "Estimated Time to First Response (seconds)",  # Added new column
         "Question Difficulty (1-5)",
         "Pass/Fail",
         "Answer Accuracy (1-5)"
