@@ -14,7 +14,7 @@ st.set_page_config(
 )
 
 # Constants
-AI_WRITING_SPEED = 130  # characters per second - much faster estimate
+AI_WRITING_SPEED = 130  # characters per second
 
 # App title and description
 st.title("Strategy Bot Query Tool")
@@ -223,9 +223,9 @@ def run_queries(questions_list):
         "Answer", 
         "Interpretation", 
         "SQL", 
-        "Time to API Response (seconds)",
+        "Time to First Response (seconds)",
         "Total Response Time (seconds)",
-        "Estimated Time to First Response (seconds)",  # Added new column
+        "Estimated Time to Start Response (seconds)",  # Renamed column
         "Question Difficulty (1-5)",
         "Pass/Fail",
         "Answer Accuracy (1-5)"
@@ -275,8 +275,12 @@ def run_queries(questions_list):
             answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
             interpretation, sql = client.extract_interpretation_and_sql(result)
             
-            # Calculate estimated writing time - now including both answer text and interpretation
+            # Calculate writing time (we'll use this to calculate the start response time)
             writing_time = calculate_writing_time(answer_text, interpretation)
+            
+            # Calculate estimated time to start response (total time minus writing time)
+            # Make sure it's not negative (can happen if our writing time estimate is too high)
+            start_response_time = max(0, total_response_time - writing_time)
             
             # Add to DataFrame with empty assessment columns
             results_df.loc[len(results_df)] = [
@@ -286,15 +290,14 @@ def run_queries(questions_list):
                 sql,
                 round(first_response_time, 2),
                 round(total_response_time, 2),
-                round(writing_time, 2),  # Add estimated writing time
+                round(start_response_time, 2),  # Add estimated time to start response
                 "",  # Question Difficulty - left empty for user to fill
                 "",  # Pass/Fail - left empty for user to fill
                 ""   # Answer Accuracy - left empty for user to fill
             ]
             
-            # Show intermediate result with combined text length
-            combined_length = len(answer_text or "") + len(interpretation or "")
-            st.success(f"✓ Got answer for question {i+1}: First response in {first_response_time:.2f}s, Total time: {total_response_time:.2f}s, Est. writing time: {writing_time:.2f}s (combined length: {combined_length} chars)")
+            # Show intermediate result - UPDATED LABELS
+            st.success(f"✓ Got answer for question {i+1}: Time to First Response: {first_response_time:.2f}s, Total Response Time: {total_response_time:.2f}s, Est. Time to Start Response: {start_response_time:.2f}s")
             
         except Exception as e:
             st.error(f"Error processing question {i+1}: {str(e)}")
@@ -307,7 +310,7 @@ def run_queries(questions_list):
                 "",
                 0,
                 0,
-                0,  # Zero estimated writing time for errors
+                0,  # Zero estimated start response time for errors
                 "",  # Question Difficulty
                 "Fail",  # Auto-fill as fail since there was an error
                 ""   # Answer Accuracy
@@ -353,6 +356,10 @@ st.markdown("""
     .stProgress > div > div {
         background-color: #4CAF50;
     }
+    .right-align {
+        text-align: right;
+        width: 100%;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -372,8 +379,15 @@ if uploaded_file is not None:
             if len(questions_list) > 5:
                 st.write("...")
         
-        # Run button with custom styling
-        if st.button("▶️ Run Queries", key="run_btn"):
+        # Create a container to properly align the button to the right
+        btn_container = st.container()
+        with btn_container:
+            # Use HTML/CSS for right alignment
+            st.markdown('<div class="right-align">', unsafe_allow_html=True)
+            run_button_pressed = st.button("▶️ Run Queries", key="run_btn")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        if run_button_pressed:
             if not username or not password:
                 st.error("Please enter your username and password")
             else:
