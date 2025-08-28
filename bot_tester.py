@@ -19,7 +19,7 @@ st.title("Strategy Bot Query Tool")
 # Instructions
 st.markdown("""
 Use this site to send multiple queries to a bot and test for accuracy. Add your bot information and credentials, 
-then attach a CSV file with all the questions you want to ask and then click "Run Queries". 
+then attach a CSV or Excel file with all the questions you want to ask and then click "Run Queries". 
 We'll let you know how long the process will take and then when you come back you'll be able to 
 download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
 """)
@@ -40,9 +40,9 @@ with input_col2:
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
     
-    # File upload
+    # File upload - now supports Excel too
     st.subheader("Questions File")
-    uploaded_file = st.file_uploader("Upload CSV file with questions", type="csv")
+    uploaded_file = st.file_uploader("Upload CSV or Excel file with questions", type=["csv", "xlsx", "xls"])
 
 # Chatbot client class
 class ChatbotClient:
@@ -94,40 +94,59 @@ class ChatbotClient:
 
     def poll_answer(self, question_id, timeout=300, interval=1):
         """
-        Poll for answer with basic first response timing
-        Returns: (response_data, time_to_first_response, total_response_time)
+        Poll for answer with improved detection based on the response structure
         """
         start_time = time.time()
         url = f"{self.base_url}/api/questions/{question_id}"
         first_response_time = None
         
-        # Try to get initial response quickly (shorter intervals)
-        for _ in range(30):  # Try for 3 seconds (30 * 0.1)
-            if time.time() - start_time > timeout:
-                raise TimeoutError("Polling timed out")
-                
-            response = self.session.get(url)
-            
-            # If we get any response with status 200, mark first response time
-            if response.status_code == 200:
-                first_response_time = time.time() - start_time
-                break
-                
-            time.sleep(0.1)
+        # Words that indicate the bot is still in processing stage
+        processing_phrases = [
+            "analyzing", "gathering", "thinking", "processing", 
+            "please wait", "working on", "searching", "loading"
+        ]
         
-        # If we still don't have first response time, set it equal to whenever we get the final answer
-        if first_response_time is None:
-            first_response_time = time.time() - start_time
-            
-        # Continue polling until completion
+        # Minimum content length to consider as real answer (not just processing message)
+        min_content_length = 80
+        
         while (time.time() - start_time) < timeout:
             response = self.session.get(url)
+            
             if response.status_code == 200:
                 data = response.json()
-                # Check if we have a complete answer
+                
                 if "answers" in data and len(data["answers"]) > 0:
-                    # Consider it complete if it has answer text
-                    if "text" in data["answers"][0] and data["answers"][0]["text"]:
+                    answer = data["answers"][0]
+                    
+                    # Check for indicators of substantive response
+                    has_substantive_content = False
+                    
+                    # 1. Check if SQL queries are present
+                    if "sqlQueries" in answer and answer["sqlQueries"]:
+                        has_substantive_content = True
+                    
+                    # 2. Check if text is substantial and not just a processing message
+                    if "text" in answer and answer["text"]:
+                        text = answer["text"].lower()
+                        is_processing_message = any(phrase in text for phrase in processing_phrases)
+                        
+                        if len(text) > min_content_length and not is_processing_message:
+                            has_substantive_content = True
+                    
+                    # 3. Check if route is "sql" which indicates SQL execution completed
+                    if "route" in answer and answer["route"] == "sql":
+                        has_substantive_content = True
+                    
+                    # Record time when we first detect substantive content
+                    if has_substantive_content and first_response_time is None:
+                        first_response_time = time.time() - start_time
+                    
+                    # Check if the response is complete
+                    if "status" in answer and answer["status"] == "completed":
+                        # If we never detected substantive content, use completion time
+                        if first_response_time is None:
+                            first_response_time = time.time() - start_time
+                            
                         return data, first_response_time, time.time() - start_time
             
             elif response.status_code != 202:
@@ -157,53 +176,75 @@ class ChatbotClient:
         
         return interpretation, sql
 
-# Parse the CSV file to extract questions - fixed for binary file handling
-def parse_questions_from_csv(file):
+# Parse questions from the uploaded file (now supports Excel too)
+def parse_questions_from_file(file):
     questions = []
     
     # Reset file pointer to beginning
     file.seek(0)
     
+    # Get file type from name
+    file_name = file.name.lower()
+    
     try:
-        # Convert bytes to string for CSV reader
-        text_content = io.TextIOWrapper(file, encoding='utf-8')
-        csv_reader = csv.reader(text_content)
-        rows = list(csv_reader)
-        
-        # If we have at least one row
-        if rows:
-            # Check if the first row looks like a header
-            first_row = rows[0]
-            possible_headers = ["question", "questions", "query", "queries"]
-            header_index = -1
-            
-            for i, cell in enumerate(first_row):
-                if cell.lower() in possible_headers:
-                    header_index = i
-                    break
+        if file_name.endswith('.csv'):
+            # Handle CSV file
+            try:
+                # Convert bytes to string for CSV reader
+                text_content = io.TextIOWrapper(file, encoding='utf-8')
+                csv_reader = csv.reader(text_content)
+                rows = list(csv_reader)
+                
+                # If we have at least one row
+                if rows:
+                    # Check if the first row looks like a header
+                    first_row = rows[0]
+                    possible_headers = ["question", "questions", "query", "queries"]
+                    header_index = -1
                     
-            # If we found a header, use that column from row 1 onwards
-            if header_index >= 0:
-                for row in rows[1:]:
-                    if len(row) > header_index and row[header_index].strip():
-                        questions.append(row[header_index].strip())
-            else:
-                # No header found, assume first column has questions including first row
-                for row in rows:
-                    if row and row[0].strip():
-                        questions.append(row[0].strip())
-                        
+                    for i, cell in enumerate(first_row):
+                        if cell.lower() in possible_headers:
+                            header_index = i
+                            break
+                            
+                    # If we found a header, use that column from row 1 onwards
+                    if header_index >= 0:
+                        for row in rows[1:]:
+                            if len(row) > header_index and row[header_index].strip():
+                                questions.append(row[header_index].strip())
+                    else:
+                        # No header found, assume first column has questions including first row
+                        for row in rows:
+                            if row and row[0].strip():
+                                questions.append(row[0].strip())
+            except Exception as e:
+                st.error(f"Error reading CSV file: {str(e)}")
+                # If CSV reading fails, try pandas as fallback
+                file.seek(0)
+                csv_data = pd.read_csv(file)
+                # If we have at least one column, take the first column
+                if len(csv_data.columns) > 0:
+                    questions = csv_data.iloc[:, 0].dropna().tolist()
+                
+        elif file_name.endswith(('.xlsx', '.xls')):
+            # Handle Excel file
+            excel_data = pd.read_excel(file)
+            
+            # Check if there's a column that looks like questions
+            question_column = None
+            for col in excel_data.columns:
+                if col.lower() in ["question", "questions", "query", "queries"]:
+                    question_column = col
+                    break
+            
+            # Use the identified column or default to first column
+            if question_column:
+                questions = excel_data[question_column].dropna().tolist()
+            elif len(excel_data.columns) > 0:
+                questions = excel_data.iloc[:, 0].dropna().tolist()
+                
     except Exception as e:
-        st.error(f"Error reading CSV file: {str(e)}")
-        # If CSV reading fails, try pandas as fallback
-        try:
-            file.seek(0)
-            csv_data = pd.read_csv(file)  # Pandas handles binary files automatically
-            # If we have at least one column, take the first column
-            if len(csv_data.columns) > 0:
-                questions = csv_data.iloc[:, 0].dropna().tolist()
-        except Exception as inner_e:
-            st.error(f"Fallback CSV reading also failed: {str(inner_e)}")
+        st.error(f"Error reading file: {str(e)}")
     
     return questions
 
@@ -217,9 +258,9 @@ def run_queries(questions_list):
         "SQL", 
         "Time to First Response (seconds)",
         "Total Response Time (seconds)",
-        "Question Difficulty (1-5)",  # New column
-        "Pass/Fail",                  # New column
-        "Answer Accuracy (1-5)"       # New column
+        "Question Difficulty (1-5)",  # New assessment column
+        "Pass/Fail",                 # New assessment column
+        "Answer Accuracy (1-5)"      # New assessment column
     ])
     
     # Initialize client
@@ -319,7 +360,7 @@ def create_download_csv(df):
     # Return the CSV data
     return csv_string
 
-# Add custom CSS styling for your interface
+# Add custom CSS styling for your interface, including positioned run button
 st.markdown("""
 <style>
     .stButton > button {
@@ -338,16 +379,37 @@ st.markdown("""
     .stProgress > div > div {
         background-color: #4CAF50;
     }
+    
+    /* Fixed position run button container */
+    .fixed-run-button {
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        z-index: 100;
+    }
+    
+    /* Make the button larger and more prominent */
+    .fixed-run-button button {
+        font-size: 20px !important;
+        padding: 12px 28px !important;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    }
+    
+    /* Add a small animation on hover */
+    .fixed-run-button button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 12px rgba(0,0,0,0.3);
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # Main app logic
 if uploaded_file is not None:
-    # Parse questions from the uploaded CSV
-    questions_list = parse_questions_from_csv(uploaded_file)
+    # Parse questions from the uploaded file (now supports Excel)
+    questions_list = parse_questions_from_file(uploaded_file)
     
     if questions_list:
-        st.write(f"Found {len(questions_list)} questions in the CSV file")
+        st.write(f"Found {len(questions_list)} questions in the uploaded file")
         
         # Show first few questions
         if len(questions_list) > 0:
@@ -357,38 +419,54 @@ if uploaded_file is not None:
             if len(questions_list) > 5:
                 st.write("...")
         
-        # Run button with custom styling
-        if st.button("▶️ Run Queries", key="run_btn"):
-            if not username or not password:
-                st.error("Please enter your username and password")
-            else:
-                # Run queries and get results
-                results_df = run_queries(questions_list)
-                
-                if results_df is not None:
-                    # Display results (hide assessment columns in the display)
-                    display_df = results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
-                    st.subheader("Results")
-                    st.dataframe(display_df, use_container_width=True)
-                    
-                    # Generate CSV file for download (includes all columns)
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    csv_data = create_download_csv(results_df)
-                    
-                    # Create download button for CSV with custom styling
-                    st.markdown('<div class="download-section">', unsafe_allow_html=True)
-                    st.download_button(
-                        label="📥 Download CSV Results (includes assessment columns)",
-                        data=csv_data,
-                        file_name=f"bot_queries_{timestamp}.csv",
-                        mime="text/csv",
-                        key="download_btn"
-                    )
-                    st.markdown('</div>', unsafe_allow_html=True)
-                    
-                    # Add note about assessment columns
-                    st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
-    else:
-        st.error("No questions found in the CSV file. Please make sure the file contains questions.")
+        # Create results display area (will be populated after running queries)
+        results_container = st.container()
+        
+        # Add spacer to ensure content isn't hidden behind the fixed button
+        st.markdown("<div style='height: 100px;'></div>", unsafe_allow_html=True)
 else:
-    st.info("Please upload a CSV file with questions to continue.")
+    st.info("Please upload a CSV or Excel file with questions to continue.")
+    questions_list = []
+
+# Fixed position run button at the bottom right
+# This is outside the if-block so it's always shown, but disabled if no file is uploaded
+st.markdown('<div class="fixed-run-button">', unsafe_allow_html=True)
+run_button_clicked = st.button(
+    "▶️ Run Queries", 
+    key="run_btn", 
+    disabled=(not questions_list or not uploaded_file)
+)
+st.markdown('</div>', unsafe_allow_html=True)
+
+# Handle button click - this needs to be outside the HTML/CSS elements
+if run_button_clicked:
+    if not username or not password:
+        st.error("Please enter your username and password")
+    else:
+        # Run queries and get results
+        results_df = run_queries(questions_list)
+        
+        if results_df is not None:
+            # Display results (hide assessment columns in the display)
+            display_df = results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
+            with results_container:
+                st.subheader("Results")
+                st.dataframe(display_df, use_container_width=True)
+                
+                # Generate CSV file for download (includes all columns)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                csv_data = create_download_csv(results_df)
+                
+                # Create download button for CSV with custom styling
+                st.markdown('<div class="download-section">', unsafe_allow_html=True)
+                st.download_button(
+                    label="📥 Download CSV Results (includes assessment columns)",
+                    data=csv_data,
+                    file_name=f"bot_queries_{timestamp}.csv",
+                    mime="text/csv",
+                    key="download_btn"
+                )
+                st.markdown('</div>', unsafe_allow_html=True)
+                
+                # Add note about assessment columns
+                st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
