@@ -6,14 +6,6 @@ import io
 import csv
 from datetime import datetime
 
-# Check for Excel dependencies
-excel_support = True
-try:
-    import openpyxl
-except ImportError:
-    excel_support = False
-    st.warning("Excel support is not available. Install the 'openpyxl' package using pip: `pip install openpyxl`")
-
 # Page configuration
 st.set_page_config(
     page_title="Strategy Bot Query Tool",
@@ -27,13 +19,10 @@ st.title("Strategy Bot Query Tool")
 # Instructions
 st.markdown("""
 Use this site to send multiple queries to a bot and test for accuracy. Add your bot information and credentials, 
-then attach a CSV or Excel file with all the questions you want to ask and then click "Run Queries". 
+then attach a CSV file with all the questions you want to ask and then click "Run Queries". 
 We'll let you know how long the process will take and then when you come back you'll be able to 
 download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
 """)
-
-# Fixed AI generation speed (characters per second) - not user configurable
-AI_GENERATION_SPEED = 70  # Characters per second
 
 # Create columns for inputs
 input_col1, input_col2 = st.columns(2)
@@ -51,13 +40,9 @@ with input_col2:
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
     
-    # File upload - handle Excel based on dependency availability
+    # File upload - CSV only
     st.subheader("Questions File")
-    if excel_support:
-        uploaded_file = st.file_uploader("Upload CSV or Excel file with questions", type=["csv", "xlsx", "xls"])
-    else:
-        uploaded_file = st.file_uploader("Upload CSV file with questions", type=["csv"])
-        st.info("To enable Excel file uploads, install the 'openpyxl' package: `pip install openpyxl`")
+    uploaded_file = st.file_uploader("Upload CSV file with questions", type=["csv"])
 
 # Chatbot client class
 class ChatbotClient:
@@ -108,24 +93,27 @@ class ChatbotClient:
         return response.json()["id"]
 
     def poll_answer(self, question_id, timeout=300, interval=1):
-        """Ultra-simplified polling method that just waits for completion"""
+        """Most basic polling method - just wait for completion"""
         start_time = time.time()
         url = f"{self.base_url}/api/questions/{question_id}"
         
         while (time.time() - start_time) < timeout:
-            response = self.session.get(url)
-            
-            if response.status_code == 200:
-                data = response.json()
+            try:
+                response = self.session.get(url)
                 
-                # Check if the response is complete
-                if ("answers" in data and len(data["answers"]) > 0 and 
-                    "status" in data["answers"][0] and data["answers"][0]["status"] == "completed"):
+                if response.status_code == 200:
+                    data = response.json()
                     
-                    return data, time.time() - start_time
-            
-            elif response.status_code != 202:
-                response.raise_for_status()
+                    # Check if the response is complete
+                    if "answers" in data and len(data["answers"]) > 0 and "status" in data["answers"][0] and data["answers"][0]["status"] == "completed":
+                        return data, time.time() - start_time
+                
+                elif response.status_code != 202:
+                    response.raise_for_status()
+                    
+            except Exception as e:
+                print(f"Error while polling: {str(e)}")
+                # Continue polling despite errors
             
             time.sleep(interval)
 
@@ -151,53 +139,24 @@ class ChatbotClient:
         
         return interpretation, sql
 
-# Parse questions from the uploaded file
-def parse_questions_from_file(file):
+# Parse questions from CSV file
+def parse_questions_from_csv(file):
     questions = []
     
-    # Reset file pointer to beginning
-    file.seek(0)
-    
-    # Get file type from name
-    file_name = file.name.lower()
-    
     try:
-        if file_name.endswith('.csv'):
-            # Handle CSV file
-            try:
-                # Read as pandas DataFrame first (more reliable)
-                file.seek(0)
-                csv_data = pd.read_csv(file)
-                
-                # If we have at least one column, take the first column
-                if len(csv_data.columns) > 0:
-                    col = csv_data.columns[0]
-                    questions = csv_data[col].dropna().tolist()
-                    
-            except Exception as e:
-                st.error(f"Error reading CSV file with pandas: {str(e)}")
-                # Fallback to simpler method
-                file.seek(0)
-                content = file.read().decode('utf-8').splitlines()
-                questions = [line.strip() for line in content if line.strip()]
-                
-        elif file_name.endswith(('.xlsx', '.xls')) and excel_support:
-            # Handle Excel file only if openpyxl is available
-            try:
-                excel_data = pd.read_excel(file)
-                
-                # If we have at least one column, take the first column
-                if len(excel_data.columns) > 0:
-                    col = excel_data.columns[0]
-                    questions = excel_data[col].dropna().tolist()
-                    
-            except Exception as e:
-                st.error(f"Error reading Excel file: {str(e)}")
-                if "openpyxl" in str(e):
-                    st.error("Missing dependency 'openpyxl'. Please install it using: pip install openpyxl")
-                
+        # First try using pandas (more reliable)
+        df = pd.read_csv(file)
+        # Take first column
+        if len(df.columns) > 0:
+            questions = df.iloc[:, 0].dropna().tolist()
     except Exception as e:
-        st.error(f"Error reading file: {str(e)}")
+        # Fallback to basic CSV reading
+        file.seek(0)
+        try:
+            csv_data = csv.reader(io.StringIO(file.getvalue().decode('utf-8')))
+            questions = [row[0] for row in csv_data if row and row[0].strip()]
+        except Exception as inner_e:
+            st.error(f"Error parsing CSV: {str(inner_e)}")
     
     return questions
 
@@ -210,7 +169,6 @@ def run_queries(questions_list):
         "Interpretation", 
         "SQL", 
         "Response Time (seconds)",
-        "Estimated Start Time (seconds)",
         "Question Difficulty (1-5)",
         "Pass/Fail",
         "Answer Accuracy (1-5)"
@@ -260,16 +218,6 @@ def run_queries(questions_list):
             answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
             interpretation, sql = client.extract_interpretation_and_sql(result)
             
-            # Calculate estimated start time based on text length and generation speed
-            text_length = len(answer_text)
-            generation_time = text_length / AI_GENERATION_SPEED  # Using fixed speed
-            
-            # If generation time > response time, use a reasonable estimate
-            if generation_time >= response_time:
-                estimated_start_time = response_time * 0.1  # Assume thinking took 10% of total time
-            else:
-                estimated_start_time = response_time - generation_time
-            
             # Add to DataFrame
             results_df.loc[len(results_df)] = [
                 question,
@@ -277,14 +225,13 @@ def run_queries(questions_list):
                 interpretation,
                 sql,
                 round(response_time, 2),
-                round(estimated_start_time, 2),
                 "",  # Question Difficulty - left empty for user to fill
                 "",  # Pass/Fail - left empty for user to fill
                 ""   # Answer Accuracy - left empty for user to fill
             ]
             
             # Show intermediate result
-            st.success(f"✓ Got answer for question {i+1} in {response_time:.2f}s (Est. start: {estimated_start_time:.2f}s)")
+            st.success(f"✓ Got answer for question {i+1} in {response_time:.2f} seconds")
             
         except Exception as e:
             st.error(f"Error processing question {i+1}: {str(e)}")
@@ -295,7 +242,6 @@ def run_queries(questions_list):
                 f"ERROR: {str(e)}",
                 "",
                 "",
-                0,
                 0,
                 "",  # Question Difficulty
                 "Fail",  # Auto-fill as fail since there was an error
@@ -368,8 +314,8 @@ st.markdown("""
 
 # Main app logic
 if uploaded_file is not None:
-    # Parse questions from the uploaded file (now supports Excel)
-    questions_list = parse_questions_from_file(uploaded_file)
+    # Parse questions from CSV file
+    questions_list = parse_questions_from_csv(uploaded_file)
     
     if questions_list:
         st.write(f"Found {len(questions_list)} questions in the uploaded file")
@@ -388,7 +334,7 @@ if uploaded_file is not None:
         # Add spacer to ensure content isn't hidden behind the fixed button
         st.markdown("<div style='height: 100px;'></div>", unsafe_allow_html=True)
 else:
-    st.info("Please upload a CSV" + (" or Excel" if excel_support else "") + " file with questions to continue.")
+    st.info("Please upload a CSV file with questions to continue.")
     questions_list = []
 
 # Fixed position run button at the bottom right
