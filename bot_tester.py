@@ -48,11 +48,12 @@ with input_col2:
     uploaded_file = st.file_uploader("Upload CSV file with questions", type="csv")
 
 # Calculate estimated writing time based on text length
-def calculate_writing_time(text):
-    """Estimate how long it would take an AI to write a text based on length"""
-    if not text:
+def calculate_writing_time(answer_text, interpretation_text):
+    """Estimate how long it would take an AI to write a response based on combined length"""
+    total_length = len(answer_text or "") + len(interpretation_text or "")
+    if total_length == 0:
         return 0.0
-    return len(text) / AI_WRITING_SPEED
+    return total_length / AI_WRITING_SPEED
 
 # Chatbot client class
 class ChatbotClient:
@@ -277,8 +278,8 @@ def run_queries(questions_list):
             answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
             interpretation, sql = client.extract_interpretation_and_sql(result)
             
-            # Calculate estimated writing time
-            writing_time = calculate_writing_time(answer_text)
+            # Calculate estimated writing time - now including both answer text and interpretation
+            writing_time = calculate_writing_time(answer_text, interpretation)
             
             # Add to DataFrame with empty assessment columns
             results_df.loc[len(results_df)] = [
@@ -294,8 +295,9 @@ def run_queries(questions_list):
                 ""   # Answer Accuracy - left empty for user to fill
             ]
             
-            # Show intermediate result
-            st.success(f"✓ Got answer for question {i+1}: First response in {first_response_time:.2f}s, Total time: {total_response_time:.2f}s, Est. writing time: {writing_time:.2f}s")
+            # Show intermediate result with combined text length
+            combined_length = len(answer_text or "") + len(interpretation or "")
+            st.success(f"✓ Got answer for question {i+1}: First response in {first_response_time:.2f}s, Total time: {total_response_time:.2f}s, Est. writing time: {writing_time:.2f}s (combined length: {combined_length} chars)")
             
         except Exception as e:
             st.error(f"Error processing question {i+1}: {str(e)}")
