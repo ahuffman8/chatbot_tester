@@ -41,6 +41,16 @@ with input_col1:
     base_url = st.text_input("Base URL", value="https://autotrial.microstrategy.com/MicroStrategyLibrary")
     project_id = st.text_input("Project ID", value="205BABE083484404399FBBA37BAA874A")
     bot_id = st.text_input("Bot ID", value="1DC776FB20744B85AFEE148D7C11C842")
+    
+    # AI Generation Speed (characters per second)
+    ai_speed = st.slider(
+        "AI Generation Speed (characters/second)",
+        min_value=10,
+        max_value=200,
+        value=70,
+        step=10,
+        help="Estimated speed at which the bot generates text"
+    )
 
 with input_col2:
     # Authentication
@@ -106,24 +116,11 @@ class ChatbotClient:
 
     def poll_answer(self, question_id, timeout=300, interval=1):
         """
-        Poll for answer with two time measurements:
-        1. When text first exceeds 50 characters (substantive content)
-        2. When answer is completed
-        
-        Returns: (response_data, time_to_substantive, total_time)
+        Simple polling method that just waits for completion
+        Returns: (response_data, total_time)
         """
         start_time = time.time()
         url = f"{self.base_url}/api/questions/{question_id}"
-        
-        # Words that indicate processing messages that don't count as substantive
-        processing_phrases = [
-            "analyzing", "gathering", "thinking", "processing", 
-            "please wait", "working on", "searching", "loading"
-        ]
-        
-        min_substantive_length = 50
-        time_to_substantive = None
-        prev_text_length = 0
         
         # Simple polling loop
         while (time.time() - start_time) < timeout:
@@ -133,30 +130,12 @@ class ChatbotClient:
                 if response.status_code == 200:
                     data = response.json()
                     
-                    # Check if we have text content
-                    if "answers" in data and len(data["answers"]) > 0 and "text" in data["answers"][0]:
-                        current_text = data["answers"][0]["text"]
-                        current_length = len(current_text)
+                    # Check if the response is complete
+                    if ("answers" in data and len(data["answers"]) > 0 and 
+                        "status" in data["answers"][0] and data["answers"][0]["status"] == "completed"):
                         
-                        # Detect first substantive content (> min_substantive_length chars)
-                        # And ensure it's not just a processing message
-                        if (time_to_substantive is None and 
-                            current_length > min_substantive_length and
-                            current_length > prev_text_length and
-                            not any(phrase.lower() in current_text.lower() for phrase in processing_phrases)):
-                            time_to_substantive = time.time() - start_time
-                        
-                        prev_text_length = current_length
-                        
-                        # Check if the response is complete
-                        if "status" in data["answers"][0] and data["answers"][0]["status"] == "completed":
-                            total_time = time.time() - start_time
-                            
-                            # If we never detected substantive content, use total time
-                            if time_to_substantive is None:
-                                time_to_substantive = total_time
-                                
-                            return data, time_to_substantive, total_time
+                        total_time = time.time() - start_time
+                        return data, total_time
                 
                 elif response.status_code != 202:
                     response.raise_for_status()
@@ -188,6 +167,23 @@ class ChatbotClient:
                     interpretation = query["explanation"]
         
         return interpretation, sql
+
+# Calculate estimated start time based on answer length and AI generation speed
+def calculate_estimated_times(answer_text, total_response_time, chars_per_second):
+    # Get answer length in characters
+    answer_length = len(answer_text)
+    
+    # Calculate estimated time to generate the answer
+    generation_time = answer_length / chars_per_second
+    
+    # Calculate estimated start time (when bot began answering)
+    # If total_response_time < generation_time, use a small value (0.5s) to avoid negative numbers
+    if total_response_time <= generation_time:
+        estimated_start_time = total_response_time - (total_response_time * 0.9)  # Just use 10% of total time
+    else:
+        estimated_start_time = total_response_time - generation_time
+    
+    return estimated_start_time, generation_time
 
 # Parse questions from the uploaded file (now handles Excel with dependency check)
 def parse_questions_from_file(file):
@@ -274,8 +270,10 @@ def run_queries(questions_list):
         "Answer", 
         "Interpretation", 
         "SQL", 
-        "Time to Substantive Content (seconds)",
+        "Answer Characters",
+        "Estimated Start Time (seconds)",
         "Total Response Time (seconds)",
+        "Estimated Generation Time (seconds)",
         "Question Difficulty (1-5)",
         "Pass/Fail",
         "Answer Accuracy (1-5)"
@@ -318,12 +316,16 @@ def run_queries(questions_list):
             # Submit question
             question_id = client.submit_question(question)
             
-            # Poll for answer with timing information
-            result, time_to_substantive, total_time = client.poll_answer(question_id)
+            # Poll for answer
+            result, total_time = client.poll_answer(question_id)
             
             # Extract data
             answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
             interpretation, sql = client.extract_interpretation_and_sql(result)
+            
+            # Calculate estimated start time and generation time
+            answer_chars = len(answer_text)
+            estimated_start, generation_time = calculate_estimated_times(answer_text, total_time, ai_speed)
             
             # Add to DataFrame with empty assessment columns
             results_df.loc[len(results_df)] = [
@@ -331,15 +333,21 @@ def run_queries(questions_list):
                 answer_text,
                 interpretation,
                 sql,
-                round(time_to_substantive, 2),
+                answer_chars,
+                round(estimated_start, 2),
                 round(total_time, 2),
+                round(generation_time, 2),
                 "",  # Question Difficulty - left empty for user to fill
                 "",  # Pass/Fail - left empty for user to fill
                 ""   # Answer Accuracy - left empty for user to fill
             ]
             
             # Show intermediate result
-            st.success(f"✓ Got answer for question {i+1}: Substantive content in {time_to_substantive:.2f}s, Total time: {total_time:.2f}s")
+            st.success(f"""✓ Got answer for question {i+1}:
+            - Answer length: {answer_chars} characters
+            - Estimated start time: {estimated_start:.2f}s
+            - Generation time: {generation_time:.2f}s
+            - Total time: {total_time:.2f}s""")
             
         except Exception as e:
             st.error(f"Error processing question {i+1}: {str(e)}")
@@ -350,6 +358,8 @@ def run_queries(questions_list):
                 f"ERROR: {str(e)}",
                 "",
                 "",
+                0,
+                0,
                 0,
                 0,
                 "",  # Question Difficulty
