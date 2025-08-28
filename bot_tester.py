@@ -32,6 +32,9 @@ We'll let you know how long the process will take and then when you come back yo
 download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
 """)
 
+# Fixed AI generation speed (characters per second) - not user configurable
+AI_GENERATION_SPEED = 70  # Characters per second
+
 # Create columns for inputs
 input_col1, input_col2 = st.columns(2)
 
@@ -41,16 +44,6 @@ with input_col1:
     base_url = st.text_input("Base URL", value="https://autotrial.microstrategy.com/MicroStrategyLibrary")
     project_id = st.text_input("Project ID", value="205BABE083484404399FBBA37BAA874A")
     bot_id = st.text_input("Bot ID", value="1DC776FB20744B85AFEE148D7C11C842")
-    
-    # AI Generation Speed (characters per second)
-    ai_speed = st.slider(
-        "AI Generation Speed (characters/second)",
-        min_value=10,
-        max_value=200,
-        value=70,
-        step=10,
-        help="Estimated speed at which the bot generates text"
-    )
 
 with input_col2:
     # Authentication
@@ -115,34 +108,24 @@ class ChatbotClient:
         return response.json()["id"]
 
     def poll_answer(self, question_id, timeout=300, interval=1):
-        """
-        Simple polling method that just waits for completion
-        Returns: (response_data, total_response_time)
-        """
+        """Ultra-simplified polling method that just waits for completion"""
         start_time = time.time()
         url = f"{self.base_url}/api/questions/{question_id}"
         
-        # Simple polling loop
         while (time.time() - start_time) < timeout:
-            try:
-                response = self.session.get(url)
+            response = self.session.get(url)
+            
+            if response.status_code == 200:
+                data = response.json()
                 
-                if response.status_code == 200:
-                    data = response.json()
+                # Check if the response is complete
+                if ("answers" in data and len(data["answers"]) > 0 and 
+                    "status" in data["answers"][0] and data["answers"][0]["status"] == "completed"):
                     
-                    # Check if the response is complete
-                    if ("answers" in data and len(data["answers"]) > 0 and 
-                        "status" in data["answers"][0] and data["answers"][0]["status"] == "completed"):
-                        
-                        total_time = time.time() - start_time
-                        return data, total_time
-                
-                elif response.status_code != 202:
-                    response.raise_for_status()
-                    
-            except Exception as e:
-                # Log error but continue polling
-                print(f"Error while polling: {str(e)}")
+                    return data, time.time() - start_time
+            
+            elif response.status_code != 202:
+                response.raise_for_status()
             
             time.sleep(interval)
 
@@ -168,7 +151,7 @@ class ChatbotClient:
         
         return interpretation, sql
 
-# Parse questions from the uploaded file (handles Excel with dependency check)
+# Parse questions from the uploaded file
 def parse_questions_from_file(file):
     questions = []
     
@@ -182,59 +165,32 @@ def parse_questions_from_file(file):
         if file_name.endswith('.csv'):
             # Handle CSV file
             try:
-                # Convert bytes to string for CSV reader
-                text_content = io.TextIOWrapper(file, encoding='utf-8')
-                csv_reader = csv.reader(text_content)
-                rows = list(csv_reader)
-                
-                # If we have at least one row
-                if rows:
-                    # Check if the first row looks like a header
-                    first_row = rows[0]
-                    possible_headers = ["question", "questions", "query", "queries"]
-                    header_index = -1
-                    
-                    for i, cell in enumerate(first_row):
-                        if cell.lower() in possible_headers:
-                            header_index = i
-                            break
-                            
-                    # If we found a header, use that column from row 1 onwards
-                    if header_index >= 0:
-                        for row in rows[1:]:
-                            if len(row) > header_index and row[header_index].strip():
-                                questions.append(row[header_index].strip())
-                    else:
-                        # No header found, assume first column has questions including first row
-                        for row in rows:
-                            if row and row[0].strip():
-                                questions.append(row[0].strip())
-            except Exception as e:
-                st.error(f"Error reading CSV file: {str(e)}")
-                # If CSV reading fails, try pandas as fallback
+                # Read as pandas DataFrame first (more reliable)
                 file.seek(0)
                 csv_data = pd.read_csv(file)
+                
                 # If we have at least one column, take the first column
                 if len(csv_data.columns) > 0:
-                    questions = csv_data.iloc[:, 0].dropna().tolist()
+                    col = csv_data.columns[0]
+                    questions = csv_data[col].dropna().tolist()
+                    
+            except Exception as e:
+                st.error(f"Error reading CSV file with pandas: {str(e)}")
+                # Fallback to simpler method
+                file.seek(0)
+                content = file.read().decode('utf-8').splitlines()
+                questions = [line.strip() for line in content if line.strip()]
                 
         elif file_name.endswith(('.xlsx', '.xls')) and excel_support:
             # Handle Excel file only if openpyxl is available
             try:
                 excel_data = pd.read_excel(file)
                 
-                # Check if there's a column that looks like questions
-                question_column = None
-                for col in excel_data.columns:
-                    if col.lower() in ["question", "questions", "query", "queries"]:
-                        question_column = col
-                        break
-                
-                # Use the identified column or default to first column
-                if question_column:
-                    questions = excel_data[question_column].dropna().tolist()
-                elif len(excel_data.columns) > 0:
-                    questions = excel_data.iloc[:, 0].dropna().tolist()
+                # If we have at least one column, take the first column
+                if len(excel_data.columns) > 0:
+                    col = excel_data.columns[0]
+                    questions = excel_data[col].dropna().tolist()
+                    
             except Exception as e:
                 st.error(f"Error reading Excel file: {str(e)}")
                 if "openpyxl" in str(e):
@@ -245,34 +201,16 @@ def parse_questions_from_file(file):
     
     return questions
 
-# Calculate estimated times based on answer length and generation speed
-def calculate_estimated_times(answer_text, total_time, chars_per_second):
-    answer_length = len(answer_text)
-    generation_time = answer_length / chars_per_second
-    
-    # Ensure estimated start time is not negative
-    if generation_time >= total_time:
-        # If generation would take longer than the total time,
-        # assume a minimal thinking time (10% of total)
-        estimated_start_time = total_time * 0.1
-        generation_time = total_time * 0.9  # Adjusted generation time
-    else:
-        estimated_start_time = total_time - generation_time
-    
-    return answer_length, estimated_start_time, generation_time
-
 # Run queries function
 def run_queries(questions_list):
-    # Create results DataFrame with timing columns
+    # Create results DataFrame
     results_df = pd.DataFrame(columns=[
         "Question", 
         "Answer", 
         "Interpretation", 
         "SQL", 
-        "Answer Length (chars)",
-        "API Response Time (seconds)",
+        "Response Time (seconds)",
         "Estimated Start Time (seconds)",
-        "Estimated Generation Time (seconds)",
         "Question Difficulty (1-5)",
         "Pass/Fail",
         "Answer Accuracy (1-5)"
@@ -315,38 +253,38 @@ def run_queries(questions_list):
             # Submit question
             question_id = client.submit_question(question)
             
-            # Poll for answer with simplified timing
-            result, api_response_time = client.poll_answer(question_id)
+            # Poll for answer
+            result, response_time = client.poll_answer(question_id)
             
             # Extract data
             answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
             interpretation, sql = client.extract_interpretation_and_sql(result)
             
-            # Calculate estimated timing metrics
-            answer_length, estimated_start, generation_time = calculate_estimated_times(
-                answer_text, api_response_time, ai_speed)
+            # Calculate estimated start time based on text length and generation speed
+            text_length = len(answer_text)
+            generation_time = text_length / AI_GENERATION_SPEED  # Using fixed speed
             
-            # Add to DataFrame with empty assessment columns
+            # If generation time > response time, use a reasonable estimate
+            if generation_time >= response_time:
+                estimated_start_time = response_time * 0.1  # Assume thinking took 10% of total time
+            else:
+                estimated_start_time = response_time - generation_time
+            
+            # Add to DataFrame
             results_df.loc[len(results_df)] = [
                 question,
                 answer_text,
                 interpretation,
                 sql,
-                answer_length,
-                round(api_response_time, 2),
-                round(estimated_start, 2),
-                round(generation_time, 2),
+                round(response_time, 2),
+                round(estimated_start_time, 2),
                 "",  # Question Difficulty - left empty for user to fill
                 "",  # Pass/Fail - left empty for user to fill
                 ""   # Answer Accuracy - left empty for user to fill
             ]
             
             # Show intermediate result
-            st.success(f"""✓ Got answer for question {i+1}:
-            - Answer length: {answer_length} characters
-            - API response time: {api_response_time:.2f}s
-            - Estimated start time: {estimated_start:.2f}s 
-            - Estimated generation time: {generation_time:.2f}s""")
+            st.success(f"✓ Got answer for question {i+1} in {response_time:.2f}s (Est. start: {estimated_start_time:.2f}s)")
             
         except Exception as e:
             st.error(f"Error processing question {i+1}: {str(e)}")
@@ -357,8 +295,6 @@ def run_queries(questions_list):
                 f"ERROR: {str(e)}",
                 "",
                 "",
-                0,
-                0,
                 0,
                 0,
                 "",  # Question Difficulty
