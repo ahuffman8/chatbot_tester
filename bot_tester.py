@@ -18,10 +18,7 @@ st.title("Strategy Bot Query Tool")
 
 # Instructions
 st.markdown("""
-Use this site to send multiple queries to a bot and test for accuracy. Add your bot information and credentials, 
-then attach a CSV file with all the questions you want to ask and then click "Run Queries". 
-We'll let you know how long the process will take and then when you come back you'll be able to 
-download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
+Use this site to send multiple questions to a bot to test for speed and accuracy. Add your bot information and credentials, then attach a CSV file with all the questions you want to ask and then click "Run Queries". We'll let you know how long the process will take and then when you come back you'll be able to download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
 """)
 
 # Create columns for inputs
@@ -157,7 +154,7 @@ class ChatbotClient:
         
         return interpretation, sql
 
-# Parse the CSV file to extract questions
+# Parse the CSV file to extract questions - fixed for binary file handling
 def parse_questions_from_csv(file):
     questions = []
     
@@ -165,8 +162,9 @@ def parse_questions_from_csv(file):
     file.seek(0)
     
     try:
-        # First, try reading as a simple CSV without assuming headers
-        csv_reader = csv.reader(file)
+        # Convert bytes to string for CSV reader
+        text_content = io.TextIOWrapper(file, encoding='utf-8')
+        csv_reader = csv.reader(text_content)
         rows = list(csv_reader)
         
         # If we have at least one row
@@ -197,8 +195,10 @@ def parse_questions_from_csv(file):
         # If CSV reading fails, try pandas as fallback
         try:
             file.seek(0)
-            csv_data = pd.read_csv(file, header=None)
-            questions = csv_data[0].dropna().tolist()
+            csv_data = pd.read_csv(file)  # Pandas handles binary files automatically
+            # If we have at least one column, take the first column
+            if len(csv_data.columns) > 0:
+                questions = csv_data.iloc[:, 0].dropna().tolist()
         except Exception as inner_e:
             st.error(f"Fallback CSV reading also failed: {str(inner_e)}")
     
