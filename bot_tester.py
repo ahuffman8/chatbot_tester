@@ -13,6 +13,9 @@ st.set_page_config(
     layout="wide"
 )
 
+# Constants
+AI_WRITING_SPEED = 100  # characters per second - much faster estimate
+
 # App title and description
 st.title("Strategy Bot Query Tool")
 
@@ -43,6 +46,13 @@ with input_col2:
     # File upload
     st.subheader("Questions File")
     uploaded_file = st.file_uploader("Upload CSV file with questions", type="csv")
+
+# Calculate estimated writing time based on text length
+def calculate_writing_time(text):
+    """Estimate how long it would take an AI to write a text based on length"""
+    if not text:
+        return 0.0
+    return len(text) / AI_WRITING_SPEED
 
 # Chatbot client class
 class ChatbotClient:
@@ -217,9 +227,10 @@ def run_queries(questions_list):
         "SQL", 
         "Time to First Response (seconds)",
         "Total Response Time (seconds)",
-        "Question Difficulty (1-5)",  # New column
-        "Pass/Fail",                  # New column
-        "Answer Accuracy (1-5)"       # New column
+        "Estimated Writing Time (seconds)",  # Added new column
+        "Question Difficulty (1-5)",
+        "Pass/Fail",
+        "Answer Accuracy (1-5)"
     ])
     
     # Initialize client
@@ -266,6 +277,9 @@ def run_queries(questions_list):
             answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
             interpretation, sql = client.extract_interpretation_and_sql(result)
             
+            # Calculate estimated writing time
+            writing_time = calculate_writing_time(answer_text)
+            
             # Add to DataFrame with empty assessment columns
             results_df.loc[len(results_df)] = [
                 question,
@@ -274,13 +288,14 @@ def run_queries(questions_list):
                 sql,
                 round(first_response_time, 2),
                 round(total_response_time, 2),
+                round(writing_time, 2),  # Add estimated writing time
                 "",  # Question Difficulty - left empty for user to fill
                 "",  # Pass/Fail - left empty for user to fill
                 ""   # Answer Accuracy - left empty for user to fill
             ]
             
             # Show intermediate result
-            st.success(f"✓ Got answer for question {i+1}: First response in {first_response_time:.2f}s, Total time: {total_response_time:.2f}s")
+            st.success(f"✓ Got answer for question {i+1}: First response in {first_response_time:.2f}s, Total time: {total_response_time:.2f}s, Est. writing time: {writing_time:.2f}s")
             
         except Exception as e:
             st.error(f"Error processing question {i+1}: {str(e)}")
@@ -293,6 +308,7 @@ def run_queries(questions_list):
                 "",
                 0,
                 0,
+                0,  # Zero estimated writing time for errors
                 "",  # Question Difficulty
                 "Fail",  # Auto-fill as fail since there was an error
                 ""   # Answer Accuracy
