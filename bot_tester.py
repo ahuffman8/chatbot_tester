@@ -6,6 +6,14 @@ import io
 import csv
 from datetime import datetime
 
+# Check for Excel dependencies
+excel_support = True
+try:
+    import openpyxl
+except ImportError:
+    excel_support = False
+    st.warning("Excel support is not available. Install the 'openpyxl' package using pip: `pip install openpyxl`")
+
 # Page configuration
 st.set_page_config(
     page_title="Strategy Bot Query Tool",
@@ -40,9 +48,13 @@ with input_col2:
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
     
-    # File upload - now supports Excel too
+    # File upload - handle Excel based on dependency availability
     st.subheader("Questions File")
-    uploaded_file = st.file_uploader("Upload CSV or Excel file with questions", type=["csv", "xlsx", "xls"])
+    if excel_support:
+        uploaded_file = st.file_uploader("Upload CSV or Excel file with questions", type=["csv", "xlsx", "xls"])
+    else:
+        uploaded_file = st.file_uploader("Upload CSV file with questions", type=["csv"])
+        st.info("To enable Excel file uploads, install the 'openpyxl' package: `pip install openpyxl`")
 
 # Chatbot client class
 class ChatbotClient:
@@ -94,64 +106,37 @@ class ChatbotClient:
 
     def poll_answer(self, question_id, timeout=300, interval=1):
         """
-        Poll for answer with improved detection based on the response structure
+        Simplified polling that still tries to detect when meaningful response starts
+        Returns: (response_data, total_response_time)
         """
         start_time = time.time()
         url = f"{self.base_url}/api/questions/{question_id}"
-        first_response_time = None
         
-        # Words that indicate the bot is still in processing stage
-        processing_phrases = [
-            "analyzing", "gathering", "thinking", "processing", 
-            "please wait", "working on", "searching", "loading"
-        ]
-        
-        # Minimum content length to consider as real answer (not just processing message)
-        min_content_length = 80
-        
+        # Simplified polling
         while (time.time() - start_time) < timeout:
-            response = self.session.get(url)
-            
-            if response.status_code == 200:
-                data = response.json()
+            try:
+                response = self.session.get(url)
                 
-                if "answers" in data and len(data["answers"]) > 0:
-                    answer = data["answers"][0]
+                if response.status_code == 200:
+                    data = response.json()
                     
-                    # Check for indicators of substantive response
-                    has_substantive_content = False
-                    
-                    # 1. Check if SQL queries are present
-                    if "sqlQueries" in answer and answer["sqlQueries"]:
-                        has_substantive_content = True
-                    
-                    # 2. Check if text is substantial and not just a processing message
-                    if "text" in answer and answer["text"]:
-                        text = answer["text"].lower()
-                        is_processing_message = any(phrase in text for phrase in processing_phrases)
+                    # Check if we have a complete answer
+                    if ("answers" in data and len(data["answers"]) > 0 and 
+                        "text" in data["answers"][0] and data["answers"][0]["text"]):
                         
-                        if len(text) > min_content_length and not is_processing_message:
-                            has_substantive_content = True
-                    
-                    # 3. Check if route is "sql" which indicates SQL execution completed
-                    if "route" in answer and answer["route"] == "sql":
-                        has_substantive_content = True
-                    
-                    # Record time when we first detect substantive content
-                    if has_substantive_content and first_response_time is None:
-                        first_response_time = time.time() - start_time
-                    
-                    # Check if the response is complete
-                    if "status" in answer and answer["status"] == "completed":
-                        # If we never detected substantive content, use completion time
-                        if first_response_time is None:
-                            first_response_time = time.time() - start_time
-                            
-                        return data, first_response_time, time.time() - start_time
+                        # Check if the response is complete
+                        if "status" in data["answers"][0] and data["answers"][0]["status"] == "completed":
+                            total_time = time.time() - start_time
+                            return data, total_time
+                
+                elif response.status_code != 202:
+                    response.raise_for_status()
             
-            elif response.status_code != 202:
-                response.raise_for_status()
-
+            except Exception as e:
+                # Log error but continue polling
+                print(f"Error while polling: {str(e)}")
+            
+            # Wait before next poll
             time.sleep(interval)
 
         raise TimeoutError("Polling timed out after 5 minutes")
@@ -176,7 +161,7 @@ class ChatbotClient:
         
         return interpretation, sql
 
-# Parse questions from the uploaded file (now supports Excel too)
+# Parse questions from the uploaded file (now handles Excel with dependency check)
 def parse_questions_from_file(file):
     questions = []
     
@@ -226,22 +211,27 @@ def parse_questions_from_file(file):
                 if len(csv_data.columns) > 0:
                     questions = csv_data.iloc[:, 0].dropna().tolist()
                 
-        elif file_name.endswith(('.xlsx', '.xls')):
-            # Handle Excel file
-            excel_data = pd.read_excel(file)
-            
-            # Check if there's a column that looks like questions
-            question_column = None
-            for col in excel_data.columns:
-                if col.lower() in ["question", "questions", "query", "queries"]:
-                    question_column = col
-                    break
-            
-            # Use the identified column or default to first column
-            if question_column:
-                questions = excel_data[question_column].dropna().tolist()
-            elif len(excel_data.columns) > 0:
-                questions = excel_data.iloc[:, 0].dropna().tolist()
+        elif file_name.endswith(('.xlsx', '.xls')) and excel_support:
+            # Handle Excel file only if openpyxl is available
+            try:
+                excel_data = pd.read_excel(file)
+                
+                # Check if there's a column that looks like questions
+                question_column = None
+                for col in excel_data.columns:
+                    if col.lower() in ["question", "questions", "query", "queries"]:
+                        question_column = col
+                        break
+                
+                # Use the identified column or default to first column
+                if question_column:
+                    questions = excel_data[question_column].dropna().tolist()
+                elif len(excel_data.columns) > 0:
+                    questions = excel_data.iloc[:, 0].dropna().tolist()
+            except Exception as e:
+                st.error(f"Error reading Excel file: {str(e)}")
+                if "openpyxl" in str(e):
+                    st.error("Missing dependency 'openpyxl'. Please install it using: pip install openpyxl")
                 
     except Exception as e:
         st.error(f"Error reading file: {str(e)}")
@@ -250,17 +240,16 @@ def parse_questions_from_file(file):
 
 # Run queries function
 def run_queries(questions_list):
-    # Create results DataFrame with additional assessment columns
+    # Create results DataFrame with simplified columns (no first response time)
     results_df = pd.DataFrame(columns=[
         "Question", 
         "Answer", 
         "Interpretation", 
         "SQL", 
-        "Time to First Response (seconds)",
-        "Total Response Time (seconds)",
-        "Question Difficulty (1-5)",  # New assessment column
-        "Pass/Fail",                 # New assessment column
-        "Answer Accuracy (1-5)"      # New assessment column
+        "Response Time (seconds)",
+        "Question Difficulty (1-5)",
+        "Pass/Fail",
+        "Answer Accuracy (1-5)"
     ])
     
     # Initialize client
@@ -300,8 +289,8 @@ def run_queries(questions_list):
             # Submit question
             question_id = client.submit_question(question)
             
-            # Poll for answer with timing information
-            result, first_response_time, total_response_time = client.poll_answer(question_id)
+            # Poll for answer with simplified timing
+            result, total_response_time = client.poll_answer(question_id)
             
             # Extract data
             answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
@@ -313,7 +302,6 @@ def run_queries(questions_list):
                 answer_text,
                 interpretation,
                 sql,
-                round(first_response_time, 2),
                 round(total_response_time, 2),
                 "",  # Question Difficulty - left empty for user to fill
                 "",  # Pass/Fail - left empty for user to fill
@@ -321,7 +309,7 @@ def run_queries(questions_list):
             ]
             
             # Show intermediate result
-            st.success(f"✓ Got answer for question {i+1}: First response in {first_response_time:.2f}s, Total time: {total_response_time:.2f}s")
+            st.success(f"✓ Got answer for question {i+1} in {total_response_time:.2f}s")
             
         except Exception as e:
             st.error(f"Error processing question {i+1}: {str(e)}")
@@ -332,7 +320,6 @@ def run_queries(questions_list):
                 f"ERROR: {str(e)}",
                 "",
                 "",
-                0,
                 0,
                 "",  # Question Difficulty
                 "Fail",  # Auto-fill as fail since there was an error
@@ -425,7 +412,7 @@ if uploaded_file is not None:
         # Add spacer to ensure content isn't hidden behind the fixed button
         st.markdown("<div style='height: 100px;'></div>", unsafe_allow_html=True)
 else:
-    st.info("Please upload a CSV or Excel file with questions to continue.")
+    st.info("Please upload a CSV" + (" or Excel" if excel_support else "") + " file with questions to continue.")
     questions_list = []
 
 # Fixed position run button at the bottom right
