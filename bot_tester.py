@@ -4,6 +4,7 @@ import requests
 import time
 import io
 import csv
+import re
 from datetime import datetime
 
 # Page configuration
@@ -19,7 +20,7 @@ st.title("Strategy Bot Query Tool")
 # Instructions
 st.markdown("""
 Use this site to send multiple queries to a bot and test for accuracy. Add your bot information and credentials, 
-then attach a CSV file with all the questions you want to ask (must be in column A) and then click "Run Queries". 
+then attach a CSV file with all the questions you want to ask and then click "Run Queries". 
 We'll let you know how long the process will take and then when you come back you'll be able to 
 download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
 """)
@@ -44,15 +45,69 @@ with input_col2:
     st.subheader("Questions File")
     uploaded_file = st.file_uploader("Upload CSV file with questions", type="csv")
 
-# Calculate estimated writing time based on text length
-def calculate_writing_time(answer_text, insights_text):
-    """Estimate how long it would take an AI to write a response based on combined length of answer and insights"""
-    total_length = len(answer_text) + len(insights_text or "")
-    if total_length<1000:
-        AI_WRITING_SPEED=100
-    else:
-        AI_WRITING_SPEED=135
-    return total_length / AI_WRITING_SPEED
+# Function to analyze SQL complexity and estimate latency
+def analyze_sql_complexity(sql_query):
+    """
+    Analyze SQL complexity and return estimated latency in seconds.
+    
+    Complexity levels:
+    - No SQL: 0.5 seconds
+    - Simple SQL: 3 seconds 
+    - Complex SQL: 5 seconds
+    - Very Complex SQL: 8 seconds
+    """
+    if not sql_query or len(sql_query.strip()) < 10:
+        return 0.5, "No SQL"  # No meaningful SQL
+    
+    # Convert to lowercase for easier pattern matching
+    sql_lower = sql_query.lower()
+    
+    # Very complex patterns (multiple joins, complex functions, subqueries, window functions)
+    very_complex_patterns = [
+        r'with\s+.*\s+as',        # CTE (Common Table Expressions)
+        r'over\s*\(',              # Window functions
+        r'(select.*from.*?)\s+select', # Subqueries
+        r'join.*join.*join',       # Multiple joins (3+)
+        r'case\s+when.*case\s+when', # Nested CASE statements
+        r'union|intersect|except'  # Set operations
+    ]
+    
+    # Complex patterns (joins, aggregations, group by)
+    complex_patterns = [
+        r'join',                   # Any kind of join
+        r'group\s+by',             # Grouping
+        r'having',                 # Having clause
+        r'order\s+by.*order\s+by', # Multiple order by clauses
+        r'distinct',               # Distinct operations
+        r'sum\(|avg\(|count\(|max\(|min\(' # Aggregations
+    ]
+    
+    # Simple patterns (basic where clauses, single table, order by)
+    simple_patterns = [
+        r'where',                  # Where clause
+        r'order\s+by',             # Order by
+        r'limit',                  # Limit clause
+        r'select.*from'            # Basic select
+    ]
+    
+    # Check for very complex patterns
+    for pattern in very_complex_patterns:
+        if re.search(pattern, sql_lower):
+            return 8.0, "Very Complex SQL"
+    
+    # Check for complex patterns
+    for pattern in complex_patterns:
+        if re.search(pattern, sql_lower):
+            return 5.0, "Complex SQL"
+    
+    # If we've gotten here, it's either simple or has unusual patterns
+    # Let's check for simple patterns
+    for pattern in simple_patterns:
+        if re.search(pattern, sql_lower):
+            return 3.0, "Simple SQL"
+    
+    # Default to simple if we can't determine (but it has some SQL)
+    return 3.0, "Simple SQL"
 
 # Chatbot client class
 class ChatbotClient:
@@ -243,11 +298,12 @@ def run_queries(questions_list):
         "Question", 
         "Answer", 
         "Interpretation", 
-        "Insights",  # Add insights column
+        "Insights",
         "SQL", 
+        "SQL Complexity", 
         "Time to First Response (seconds)",
         "Total Response Time (seconds)",
-        "Estimated Time to Start Response (seconds)",
+        "Estimated LLM Processing Time (seconds)",
         "Question Difficulty (1-5)",
         "Pass/Fail",
         "Answer Accuracy (1-5)"
@@ -297,31 +353,34 @@ def run_queries(questions_list):
             answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
             interpretation, sql, insights = client.extract_data_from_response(result)
             
-            # Calculate writing time (using answer and insights, NOT interpretation)
-            writing_time = calculate_writing_time(answer_text, insights)
+            # Analyze SQL complexity and get estimated latency
+            latency, complexity = analyze_sql_complexity(sql)
             
-            # Calculate estimated time to start response (total time minus writing time)
-            # Make sure it's not negative (can happen if our writing time estimate is too high)
-            start_response_time = max(0, total_response_time - writing_time)
+            # Calculate estimated LLM processing time (API response time + SQL complexity latency)
+            llm_processing_time = first_response_time + latency
             
             # Add to DataFrame with empty assessment columns
             results_df.loc[len(results_df)] = [
                 question,
                 answer_text,
                 interpretation,
-                insights,  # Add insights
+                insights,
                 sql,
+                complexity,
                 round(first_response_time, 2),
                 round(total_response_time, 2),
-                round(start_response_time, 2),
+                round(llm_processing_time, 2),
                 "",  # Question Difficulty - left empty for user to fill
                 "",  # Pass/Fail - left empty for user to fill
                 ""   # Answer Accuracy - left empty for user to fill
             ]
             
             # Show intermediate result - UPDATED LABELS
-            combined_length = len(answer_text or "") + len(insights or "")
-            st.success(f"✓ Got answer for question {i+1}: Time to First Response: {first_response_time:.2f}s, Total Response Time: {total_response_time:.2f}s, Est. Time to Start Response: {start_response_time:.2f}s (Response length: {combined_length} chars)")
+            st.success(f"""✓ Got answer for question {i+1}:
+            - Time to First Response: {first_response_time:.2f}s
+            - Total Response Time: {total_response_time:.2f}s
+            - SQL Complexity: {complexity} (+{latency:.1f}s)
+            - Estimated LLM Processing Time: {llm_processing_time:.2f}s""")
             
         except Exception as e:
             st.error(f"Error processing question {i+1}: {str(e)}")
@@ -333,6 +392,7 @@ def run_queries(questions_list):
                 "",
                 "",
                 "",
+                "N/A",
                 0,
                 0,
                 0,
