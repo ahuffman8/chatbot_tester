@@ -14,14 +14,17 @@ st.set_page_config(
 )
 
 # Constants
-AI_WRITING_SPEED = 130  # characters per second
+AI_WRITING_SPEED = 100  # characters per second - much faster estimate
 
 # App title and description
 st.title("Strategy Bot Query Tool")
 
 # Instructions
 st.markdown("""
-Use this site to send multiple questions to a bot to test for speed and accuracy. Add your bot information and credentials, then attach a CSV file with all the questions you want to ask and then click "Run Queries". We'll let you know how long the process will take and then when you come back you'll be able to download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
+Use this site to send multiple queries to a bot and test for accuracy. Add your bot information and credentials, 
+then attach a CSV file with all the questions you want to ask and then click "Run Queries". 
+We'll let you know how long the process will take and then when you come back you'll be able to 
+download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
 """)
 
 # Create columns for inputs
@@ -45,9 +48,9 @@ with input_col2:
     uploaded_file = st.file_uploader("Upload CSV file with questions", type="csv")
 
 # Calculate estimated writing time based on text length
-def calculate_writing_time(answer_text, interpretation_text):
-    """Estimate how long it would take an AI to write a response based on combined length"""
-    total_length = len(answer_text or "") + len(interpretation_text or "")
+def calculate_writing_time(answer_text, insights_text):
+    """Estimate how long it would take an AI to write a response based on combined length of answer and insights"""
+    total_length = len(answer_text or "") + len(insights_text or "")
     if total_length == 0:
         return 0.0
     return total_length / AI_WRITING_SPEED
@@ -145,10 +148,14 @@ class ChatbotClient:
 
         raise TimeoutError("Polling timed out after 5 minutes")
         
-    def extract_interpretation_and_sql(self, response_data):
-        """Extract both interpretation text and SQL queries from the response"""
+    def extract_data_from_response(self, response_data):
+        """
+        Extract interpretation, SQL, and insights from the response.
+        Returns: (interpretation, sql, insights)
+        """
         interpretation = ""
         sql = ""
+        insights = ""
         
         if "answers" in response_data and len(response_data["answers"]) > 0:
             answer = response_data["answers"][0]
@@ -162,8 +169,23 @@ class ChatbotClient:
                 query = answer["queries"][0]
                 if "explanation" in query:
                     interpretation = query["explanation"]
+            
+            # Extract insights if available
+            if "insights" in answer:
+                # Handle insights based on data structure (could be string or object)
+                if isinstance(answer["insights"], str):
+                    insights = answer["insights"]
+                elif isinstance(answer["insights"], list) and len(answer["insights"]) > 0:
+                    # If it's a list of objects, try to extract text from each
+                    insights_texts = []
+                    for insight in answer["insights"]:
+                        if isinstance(insight, str):
+                            insights_texts.append(insight)
+                        elif isinstance(insight, dict) and "text" in insight:
+                            insights_texts.append(insight["text"])
+                    insights = "\n".join(insights_texts)
         
-        return interpretation, sql
+        return interpretation, sql, insights
 
 # Parse the CSV file to extract questions - fixed for binary file handling
 def parse_questions_from_csv(file):
@@ -222,10 +244,11 @@ def run_queries(questions_list):
         "Question", 
         "Answer", 
         "Interpretation", 
+        "Insights",  # Add insights column
         "SQL", 
         "Time to First Response (seconds)",
         "Total Response Time (seconds)",
-        "Estimated Time to Start Response (seconds)",  # Renamed column
+        "Estimated Time to Start Response (seconds)",
         "Question Difficulty (1-5)",
         "Pass/Fail",
         "Answer Accuracy (1-5)"
@@ -273,10 +296,10 @@ def run_queries(questions_list):
             
             # Extract data
             answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
-            interpretation, sql = client.extract_interpretation_and_sql(result)
+            interpretation, sql, insights = client.extract_data_from_response(result)
             
-            # Calculate writing time (we'll use this to calculate the start response time)
-            writing_time = calculate_writing_time(answer_text, interpretation)
+            # Calculate writing time (using answer and insights, NOT interpretation)
+            writing_time = calculate_writing_time(answer_text, insights)
             
             # Calculate estimated time to start response (total time minus writing time)
             # Make sure it's not negative (can happen if our writing time estimate is too high)
@@ -287,17 +310,19 @@ def run_queries(questions_list):
                 question,
                 answer_text,
                 interpretation,
+                insights,  # Add insights
                 sql,
                 round(first_response_time, 2),
                 round(total_response_time, 2),
-                round(start_response_time, 2),  # Add estimated time to start response
+                round(start_response_time, 2),
                 "",  # Question Difficulty - left empty for user to fill
                 "",  # Pass/Fail - left empty for user to fill
                 ""   # Answer Accuracy - left empty for user to fill
             ]
             
             # Show intermediate result - UPDATED LABELS
-            st.success(f"✓ Got answer for question {i+1}: Time to First Response: {first_response_time:.2f}s, Total Response Time: {total_response_time:.2f}s, Est. Time to Start Response: {start_response_time:.2f}s")
+            combined_length = len(answer_text or "") + len(insights or "")
+            st.success(f"✓ Got answer for question {i+1}: Time to First Response: {first_response_time:.2f}s, Total Response Time: {total_response_time:.2f}s, Est. Time to Start Response: {start_response_time:.2f}s (Response length: {combined_length} chars)")
             
         except Exception as e:
             st.error(f"Error processing question {i+1}: {str(e)}")
@@ -308,9 +333,10 @@ def run_queries(questions_list):
                 f"ERROR: {str(e)}",
                 "",
                 "",
+                "",
                 0,
                 0,
-                0,  # Zero estimated start response time for errors
+                0,
                 "",  # Question Difficulty
                 "Fail",  # Auto-fill as fail since there was an error
                 ""   # Answer Accuracy
