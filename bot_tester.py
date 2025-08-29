@@ -13,9 +13,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Constants
-AI_WRITING_SPEED = 100  # characters per second
-
 # App title and description
 st.title("Strategy Bot Query Tool")
 
@@ -51,6 +48,10 @@ with input_col2:
 def calculate_writing_time(answer_text, insights_text):
     """Estimate how long it would take an AI to write a response based on combined length of answer and insights"""
     total_length = len(answer_text) + len(insights_text or "")
+    if total_length<1000:
+        AI_WRITING_SPEED=100
+    else:
+        AI_WRITING_SPEED=135
     return total_length / AI_WRITING_SPEED
 
 # Chatbot client class
