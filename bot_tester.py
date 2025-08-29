@@ -14,7 +14,7 @@ st.set_page_config(
 )
 
 # Constants
-AI_WRITING_SPEED = 100  # characters per second - much faster estimate
+AI_WRITING_SPEED = 100  # characters per second
 
 # App title and description
 st.title("Strategy Bot Query Tool")
@@ -22,7 +22,7 @@ st.title("Strategy Bot Query Tool")
 # Instructions
 st.markdown("""
 Use this site to send multiple queries to a bot and test for accuracy. Add your bot information and credentials, 
-then attach a CSV file with all the questions you want to ask and then click "Run Queries". 
+then attach a CSV file with all the questions you want to ask (must be in column A) and then click "Run Queries". 
 We'll let you know how long the process will take and then when you come back you'll be able to 
 download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
 """)
@@ -50,9 +50,7 @@ with input_col2:
 # Calculate estimated writing time based on text length
 def calculate_writing_time(answer_text, insights_text):
     """Estimate how long it would take an AI to write a response based on combined length of answer and insights"""
-    total_length = len(answer_text or "") + len(insights_text or "")
-    if total_length == 0:
-        return 0.0
+    total_length = len(answer_text) + len(insights_text or "")
     return total_length / AI_WRITING_SPEED
 
 # Chatbot client class
