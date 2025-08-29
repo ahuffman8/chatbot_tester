@@ -93,18 +93,18 @@ def analyze_sql_complexity(sql_query):
     # Check for very complex patterns
     for pattern in very_complex_patterns:
         if re.search(pattern, sql_lower):
-            return 8.0, "Very Complex SQL"
+            return 8.4, "Very Complex SQL"
     
     # Check for complex patterns
     for pattern in complex_patterns:
         if re.search(pattern, sql_lower):
-            return 5.0, "Complex SQL"
+            return 5.5, "Complex SQL"
     
     # If we've gotten here, it's either simple or has unusual patterns
     # Let's check for simple patterns
     for pattern in simple_patterns:
         if re.search(pattern, sql_lower):
-            return 3.0, "Simple SQL"
+            return 3.1, "Simple SQL"
     
     # Default to simple if we can't determine (but it has some SQL)
     return 3.0, "Simple SQL"
@@ -297,13 +297,12 @@ def run_queries(questions_list):
     results_df = pd.DataFrame(columns=[
         "Question", 
         "Answer", 
+        "Insights",  # Moved to be after Answer
         "Interpretation", 
-        "Insights",
         "SQL", 
-        "SQL Complexity", 
-        "Time to First Response (seconds)",
+        "API Response Time (seconds)",  # Renamed from "Time to First Response"
         "Total Response Time (seconds)",
-        "Estimated LLM Processing Time (seconds)",
+        "Estimated Time to First Response (seconds)",  # Renamed from "Estimated LLM Processing Time"
         "Question Difficulty (1-5)",
         "Pass/Fail",
         "Answer Accuracy (1-5)"
@@ -356,20 +355,19 @@ def run_queries(questions_list):
             # Analyze SQL complexity and get estimated latency
             latency, complexity = analyze_sql_complexity(sql)
             
-            # Calculate estimated LLM processing time (API response time + SQL complexity latency)
-            llm_processing_time = first_response_time + latency
+            # Calculate estimated time to first response (API response time + SQL complexity latency)
+            estimated_first_response = first_response_time + latency
             
             # Add to DataFrame with empty assessment columns
             results_df.loc[len(results_df)] = [
                 question,
                 answer_text,
+                insights,       # Moved to be after Answer
                 interpretation,
-                insights,
                 sql,
-                complexity,
                 round(first_response_time, 2),
                 round(total_response_time, 2),
-                round(llm_processing_time, 2),
+                round(estimated_first_response, 2),
                 "",  # Question Difficulty - left empty for user to fill
                 "",  # Pass/Fail - left empty for user to fill
                 ""   # Answer Accuracy - left empty for user to fill
@@ -377,10 +375,10 @@ def run_queries(questions_list):
             
             # Show intermediate result - UPDATED LABELS
             st.success(f"""✓ Got answer for question {i+1}:
-            - Time to First Response: {first_response_time:.2f}s
+            - API Response Time: {first_response_time:.2f}s
             - Total Response Time: {total_response_time:.2f}s
             - SQL Complexity: {complexity} (+{latency:.1f}s)
-            - Estimated LLM Processing Time: {llm_processing_time:.2f}s""")
+            - Estimated Time to First Response: {estimated_first_response:.2f}s""")
             
         except Exception as e:
             st.error(f"Error processing question {i+1}: {str(e)}")
@@ -392,7 +390,6 @@ def run_queries(questions_list):
                 "",
                 "",
                 "",
-                "N/A",
                 0,
                 0,
                 0,
