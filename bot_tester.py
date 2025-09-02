@@ -14,15 +14,23 @@ st.set_page_config(
     layout="wide"
 )
 
+# Initialize session state variables if they don't exist
+if 'results_df' not in st.session_state:
+    st.session_state.results_df = None
+if 'has_run' not in st.session_state:
+    st.session_state.has_run = False
+if 'timestamp' not in st.session_state:
+    st.session_state.timestamp = None
+
 # App title and description
 st.title("Strategy Bot Query Tool")
 
 # Instructions
 st.markdown("""
-Use this site to send multiple queries to a bot and test for accuracy. Add your bot information and credentials, 
+Use this site to send multiple queries to a bot and test for speed and accuracy. Add your bot information and credentials, 
 then attach a CSV file with all the questions you want to ask and then click "Run Queries". 
-We'll let you know how long the process will take and then when you come back you'll be able to 
-download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
+We'll let you know how long the process will take, and then when you come back you'll be able to 
+download a file with all the questions, answers, insights, interpretations, SQL queries, and response times to judge the performance of your bot.
 """)
 
 # Create columns for inputs
@@ -43,7 +51,7 @@ with input_col2:
     
     # File upload
     st.subheader("Questions File")
-    uploaded_file = st.file_uploader("Upload CSV file with questions", type="csv")
+    uploaded_file = st.file_uploader("Upload CSV file with questions", type="csv", key="file_uploader")
 
 # Function to analyze SQL complexity and estimate latency
 def analyze_sql_complexity(sql_query):
@@ -52,9 +60,9 @@ def analyze_sql_complexity(sql_query):
     
     Complexity levels:
     - No SQL: 0.5 seconds
-    - Simple SQL: 3 seconds 
-    - Complex SQL: 5 seconds
-    - Very Complex SQL: 8 seconds
+    - Simple SQL: 3.1 seconds 
+    - Complex SQL: 5.5 seconds
+    - Very Complex SQL: 8.4 seconds
     """
     if not sql_query or len(sql_query.strip()) < 10:
         return 0.5, "No SQL"  # No meaningful SQL
@@ -107,7 +115,7 @@ def analyze_sql_complexity(sql_query):
             return 3.1, "Simple SQL"
     
     # Default to simple if we can't determine (but it has some SQL)
-    return 3.0, "Simple SQL"
+    return 4.0, "Some SQL"
 
 # Chatbot client class
 class ChatbotClient:
@@ -435,6 +443,9 @@ st.markdown("""
     .download-btn {
         background-color: #008CBA;
     }
+    .new-test-btn {
+        background-color: #f44336;
+    }
     .stProgress > div > div {
         background-color: #4CAF50;
     }
@@ -445,61 +456,107 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Function to handle starting a new test
+def start_new_test():
+    st.session_state.has_run = False
+    st.session_state.results_df = None
+    st.session_state.timestamp = None
+    # Also clear the file uploader
+    st.session_state.file_uploader = None
+
 # Main app logic
-if uploaded_file is not None:
-    # Parse questions from the uploaded CSV
-    questions_list = parse_questions_from_csv(uploaded_file)
+if st.session_state.has_run and st.session_state.results_df is not None:
+    # If we have previous results, display them and offer "New Test" button
+    st.success(f"Previous test results from {st.session_state.timestamp} are available.")
     
-    if questions_list:
-        st.write(f"Found {len(questions_list)} questions in the CSV file")
-        
-        # Show first few questions
-        if len(questions_list) > 0:
-            st.subheader("Sample Questions:")
-            for i, q in enumerate(questions_list[:5]):
-                st.write(f"{i+1}. {q}")
-            if len(questions_list) > 5:
-                st.write("...")
-        
-        # Create a container to properly align the button to the right
-        btn_container = st.container()
-        with btn_container:
-            # Use HTML/CSS for right alignment
-            st.markdown('<div class="right-align">', unsafe_allow_html=True)
-            run_button_pressed = st.button("▶️ Run Queries", key="run_btn")
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        if run_button_pressed:
-            if not username or not password:
-                st.error("Please enter your username and password")
-            else:
-                # Run queries and get results
-                results_df = run_queries(questions_list)
-                
-                if results_df is not None:
-                    # Display results (hide assessment columns in the display)
-                    display_df = results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
-                    st.subheader("Results")
-                    st.dataframe(display_df, use_container_width=True)
-                    
-                    # Generate CSV file for download (includes all columns)
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    csv_data = create_download_csv(results_df)
-                    
-                    # Create download button for CSV with custom styling
-                    st.markdown('<div class="download-section">', unsafe_allow_html=True)
-                    st.download_button(
-                        label="📥 Download CSV Results (includes assessment columns)",
-                        data=csv_data,
-                        file_name=f"bot_queries_{timestamp}.csv",
-                        mime="text/csv",
-                        key="download_btn"
-                    )
-                    st.markdown('</div>', unsafe_allow_html=True)
-                    
-                    # Add note about assessment columns
-                    st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
-    else:
-        st.error("No questions found in the CSV file. Please make sure the file contains questions.")
+    # Create columns for button placement
+    new_test_col, _ = st.columns([0.2, 0.8])
+    
+    with new_test_col:
+        if st.button("Start New Test", key="new_test", 
+                    help="Clear previous results and start a new test", 
+                    type="primary"):
+            start_new_test()
+            st.experimental_rerun()
+    
+    # Display previous results
+    st.subheader("Previous Results")
+    display_df = st.session_state.results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
+    st.dataframe(display_df, use_container_width=True)
+    
+    # Create download button for CSV with custom styling
+    st.markdown('<div class="download-section">', unsafe_allow_html=True)
+    csv_data = create_download_csv(st.session_state.results_df)
+    st.download_button(
+        label="📥 Download CSV Results (includes assessment columns)",
+        data=csv_data,
+        file_name=f"bot_queries_{st.session_state.timestamp}.csv",
+        mime="text/csv",
+        key="download_btn"
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Add note about assessment columns
+    st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
+
 else:
-    st.info("Please upload a CSV file with questions to continue.")
+    # Normal flow for new tests
+    if uploaded_file is not None:
+        # Parse questions from the uploaded CSV
+        questions_list = parse_questions_from_csv(uploaded_file)
+        
+        if questions_list:
+            st.write(f"Found {len(questions_list)} questions in the CSV file")
+            
+            # Show first few questions
+            if len(questions_list) > 0:
+                st.subheader("Sample Questions:")
+                for i, q in enumerate(questions_list[:5]):
+                    st.write(f"{i+1}. {q}")
+                if len(questions_list) > 5:
+                    st.write("...")
+            
+            # Create a container to properly align the button to the right
+            btn_container = st.container()
+            with btn_container:
+                # Use HTML/CSS for right alignment
+                st.markdown('<div class="right-align">', unsafe_allow_html=True)
+                run_button_pressed = st.button("▶️ Run Queries", key="run_btn")
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            if run_button_pressed:
+                if not username or not password:
+                    st.error("Please enter your username and password")
+                else:
+                    # Run queries and get results
+                    results_df = run_queries(questions_list)
+                    
+                    if results_df is not None:
+                        # Store results in session state
+                        st.session_state.results_df = results_df
+                        st.session_state.has_run = True
+                        st.session_state.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        
+                        # Display results (hide assessment columns in the display)
+                        display_df = results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
+                        st.subheader("Results")
+                        st.dataframe(display_df, use_container_width=True)
+                        
+                        # Create download button for CSV with custom styling
+                        st.markdown('<div class="download-section">', unsafe_allow_html=True)
+                        csv_data = create_download_csv(results_df)
+                        st.download_button(
+                            label="📥 Download CSV Results (includes assessment columns)",
+                            data=csv_data,
+                            file_name=f"bot_queries_{st.session_state.timestamp}.csv",
+                            mime="text/csv",
+                            key="download_btn"
+                        )
+                        st.markdown('</div>', unsafe_allow_html=True)
+                        
+                        # Add note about assessment columns
+                        st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
+        else:
+            st.error("No questions found in the CSV file. Please make sure the file contains questions.")
+    else:
+        st.info("Please upload a CSV file with questions to continue.")
