@@ -24,7 +24,7 @@ if 'results_filename' not in st.session_state:
 
 # Function to reset the session state
 def reset_session():
-    # Set a flag to trigger page refresh
+    # Clear all results
     st.session_state.has_results = False
     st.session_state.results_df = None
     st.session_state.results_filename = None
@@ -40,24 +40,11 @@ st.title("Strategy Bot Query Tool")
 
 # Instructions
 st.markdown("""
-Use this site to send multiple queries to a bot and test for speed and accuracy. Add your bot information and credentials, 
-then attach a CSV file with all the questions you want to ask and then click "Run Queries". Note: All Questions must be in column A.
+Use this site to send multiple queries to a bot and test for accuracy. Add your bot information and credentials, 
+then attach a CSV file with all the questions you want to ask and then click "Run Queries". 
 We'll let you know how long the process will take and then when you come back you'll be able to 
-download a file with all the questions, answers, insights, interpretations, SQL queries, and response times to judge the performance of your bot.
+download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
 """)
-
-# Add Run New Test button at the top if we have results
-if st.session_state.has_results:
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        if st.button("🔄 Run New Test", type="primary"):
-            reset_session()
-            st.experimental_rerun()
-    with col2:
-        st.warning("This will delete prior test results. Be sure you have downloaded all test results before starting a new test.")
-    
-    # Display a divider
-    st.markdown("---")
 
 # Function to analyze SQL complexity and estimate latency
 def analyze_sql_complexity(sql_query):
@@ -66,9 +53,9 @@ def analyze_sql_complexity(sql_query):
     
     Complexity levels:
     - No SQL: 0.5 seconds
-    - Simple SQL: 3.1 seconds 
-    - Complex SQL: 5.5 seconds
-    - Very Complex SQL: 8.4 seconds
+    - Simple SQL: 3 seconds 
+    - Complex SQL: 5 seconds
+    - Very Complex SQL: 8 seconds
     """
     if not sql_query or len(sql_query.strip()) < 10:
         return 0.5, "No SQL"  # No meaningful SQL
@@ -107,21 +94,21 @@ def analyze_sql_complexity(sql_query):
     # Check for very complex patterns
     for pattern in very_complex_patterns:
         if re.search(pattern, sql_lower):
-            return 8.4, "Very Complex SQL"
+            return 8.0, "Very Complex SQL"
     
     # Check for complex patterns
     for pattern in complex_patterns:
         if re.search(pattern, sql_lower):
-            return 5.5, "Complex SQL"
+            return 5.0, "Complex SQL"
     
     # If we've gotten here, it's either simple or has unusual patterns
     # Let's check for simple patterns
     for pattern in simple_patterns:
         if re.search(pattern, sql_lower):
-            return 3.1, "Simple SQL"
+            return 3.0, "Simple SQL"
     
     # Default to simple if we can't determine (but it has some SQL)
-    return 4.0, "Simple SQL"
+    return 3.0, "Simple SQL"
 
 # Chatbot client class
 class ChatbotClient:
@@ -456,6 +443,18 @@ st.markdown("""
         text-align: right;
         width: 100%;
     }
+    .warning-box {
+        background-color: #fff3cd;
+        padding: 10px 15px;
+        border-left: 5px solid #ffc107;
+        margin: 10px 0;
+    }
+    .new-test-btn button {
+        background-color: #dc3545 !important;
+    }
+    .new-test-btn button:hover {
+        background-color: #c82333 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -480,6 +479,18 @@ if st.session_state.has_results and st.session_state.results_df is not None:
     
     # Add note about assessment columns
     st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
+    
+    # Add "Run New Test" button and warning below the results
+    st.markdown("---")
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        st.markdown('<div class="new-test-btn">', unsafe_allow_html=True)
+        if st.button("🔄 Run New Test", key="new_test_btn"):
+            reset_session()
+            st.experimental_rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+    with col2:
+        st.markdown('<div class="warning-box">This will delete prior test results. Be sure you have downloaded all test results before starting a new test.</div>', unsafe_allow_html=True)
 
 else:
     # Show the form to create a new test
@@ -543,8 +554,8 @@ else:
                         st.session_state.results_filename = f"bot_queries_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
                         
                         # Display results (hide assessment columns in the display)
-                        display_df = results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
                         st.subheader("Results")
+                        display_df = results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
                         st.dataframe(display_df, use_container_width=True)
                         
                         # Create download button for CSV with custom styling
@@ -562,6 +573,18 @@ else:
                         
                         # Add note about assessment columns
                         st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
+                        
+                        # Immediately show the Run New Test button and warning
+                        st.markdown("---")
+                        col1, col2 = st.columns([1, 3])
+                        with col1:
+                            st.markdown('<div class="new-test-btn">', unsafe_allow_html=True)
+                            if st.button("🔄 Run New Test", key="new_test_after_run"):
+                                reset_session()
+                                st.experimental_rerun()
+                            st.markdown('</div>', unsafe_allow_html=True)
+                        with col2:
+                            st.markdown('<div class="warning-box">This will delete prior test results. Be sure you have downloaded all test results before starting a new test.</div>', unsafe_allow_html=True)
         else:
             st.error("No questions found in the CSV file. Please make sure the file contains questions.")
     else:
