@@ -14,6 +14,14 @@ st.set_page_config(
     layout="wide"
 )
 
+# Check if we need to reset state based on query parameters
+if 'reset' in st.experimental_get_query_params():
+    # Clear all session state if reset parameter is present
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    # Remove the reset parameter
+    st.experimental_set_query_params()
+
 # Initialize session state variables if they don't exist
 if 'has_results' not in st.session_state:
     st.session_state.has_results = False
@@ -21,19 +29,15 @@ if 'results_df' not in st.session_state:
     st.session_state.results_df = None
 if 'results_filename' not in st.session_state:
     st.session_state.results_filename = None
-
-# Function to reset the session state
-def reset_session():
-    # Clear all results
-    st.session_state.has_results = False
-    st.session_state.results_df = None
-    st.session_state.results_filename = None
-    # Force the file uploader to reset too
-    st.session_state.file_uploader_key = datetime.now().strftime("%Y%m%d%H%M%S")
-
-# Initialize file uploader key if it doesn't exist
 if 'file_uploader_key' not in st.session_state:
     st.session_state.file_uploader_key = "initial"
+
+# Function to reset the session state via URL parameter
+def reset_session():
+    # Set URL parameter to trigger reset on next load
+    st.experimental_set_query_params(reset='true')
+    # Rerun the app to apply the reset
+    st.experimental_rerun()
 
 # App title and description
 st.title("Strategy Bot Query Tool")
@@ -486,8 +490,7 @@ if st.session_state.has_results and st.session_state.results_df is not None:
     with col1:
         st.markdown('<div class="new-test-btn">', unsafe_allow_html=True)
         if st.button("🔄 Run New Test", key="new_test_btn"):
-            reset_session()
-            st.experimental_rerun()
+            reset_session()  # This will add a URL parameter and trigger a page reload
         st.markdown('</div>', unsafe_allow_html=True)
     with col2:
         st.markdown('<div class="warning-box">This will delete prior test results. Be sure you have downloaded all test results before starting a new test.</div>', unsafe_allow_html=True)
@@ -580,8 +583,7 @@ else:
                         with col1:
                             st.markdown('<div class="new-test-btn">', unsafe_allow_html=True)
                             if st.button("🔄 Run New Test", key="new_test_after_run"):
-                                reset_session()
-                                st.experimental_rerun()
+                                reset_session()  # This will add a URL parameter and trigger a page reload
                             st.markdown('</div>', unsafe_allow_html=True)
                         with col2:
                             st.markdown('<div class="warning-box">This will delete prior test results. Be sure you have downloaded all test results before starting a new test.</div>', unsafe_allow_html=True)
