@@ -6,6 +6,7 @@ import io
 import csv
 import re
 from datetime import datetime
+import base64
 
 # Page configuration
 st.set_page_config(
@@ -14,30 +15,20 @@ st.set_page_config(
     layout="wide"
 )
 
-# Check if we need to reset state based on query parameters
-if "reset" in st.query_params:
-    # Clear all session state if reset parameter is present
-    for key in list(st.session_state.keys()):
-        del st.session_state[key]
-    # Remove the reset parameter
-    st.query_params.clear()
-
-# Initialize session state variables if they don't exist
-if 'has_results' not in st.session_state:
-    st.session_state.has_results = False
+# Initialize session state to store results
 if 'results_df' not in st.session_state:
     st.session_state.results_df = None
-if 'results_filename' not in st.session_state:
-    st.session_state.results_filename = None
-if 'file_uploader_key' not in st.session_state:
-    st.session_state.file_uploader_key = "initial"
+if 'results_timestamp' not in st.session_state:
+    st.session_state.results_timestamp = None
+if 'show_new_test_form' not in st.session_state:
+    st.session_state.show_new_test_form = True
 
-# Function to reset the session state via URL parameter
-def reset_session():
-    # Set URL parameter to trigger reset on next load
-    st.query_params["reset"] = "true"
-    # Rerun the app to apply the reset
-    st.experimental_rerun()
+# Function to create download link that works without refreshing
+def get_download_link(df, filename):
+    csv = df.to_csv(index=False)
+    b64 = base64.b64encode(csv.encode()).decode()
+    href = f'<a href="data:file/csv;base64,{b64}" download="{filename}" class="download-button">📥 Download CSV Results (includes assessment columns)</a>'
+    return href
 
 # App title and description
 st.title("Strategy Bot Query Tool")
@@ -437,8 +428,18 @@ st.markdown("""
     .stButton > button:hover {
         background-color: #45a049;
     }
-    .download-btn {
+    .download-button {
+        display: inline-block;
         background-color: #008CBA;
+        color: white;
+        font-size: 16px;
+        padding: 10px 20px;
+        border-radius: 8px;
+        text-decoration: none;
+        margin-top: 10px;
+    }
+    .download-button:hover {
+        background-color: #0073a8;
     }
     .stProgress > div > div {
         background-color: #4CAF50;
@@ -453,141 +454,138 @@ st.markdown("""
         border-left: 5px solid #ffc107;
         margin: 10px 0;
     }
-    .new-test-btn button {
-        background-color: #dc3545 !important;
+    .new-test-btn {
+        display: inline-block;
+        background-color: #dc3545;
+        color: white;
+        font-size: 16px;
+        padding: 10px 20px;
+        border-radius: 8px;
+        text-decoration: none;
+        margin-top: 10px;
     }
-    .new-test-btn button:hover {
-        background-color: #c82333 !important;
+    .new-test-btn:hover {
+        background-color: #c82333;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Main app logic - check if we have existing results
-if st.session_state.has_results and st.session_state.results_df is not None:
-    # Display the existing results
-    st.header("Test Results")
+# If we have stored results, display them first
+if st.session_state.results_df is not None:
+    st.header("Previous Test Results")
     
     # Display the dataframe
     display_df = st.session_state.results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
     st.dataframe(display_df, use_container_width=True)
     
-    # Create download button
-    csv_data = create_download_csv(st.session_state.results_df)
+    # Get timestamp for filename
+    timestamp = st.session_state.results_timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Create download button with standard Streamlit method
     st.download_button(
         label="📥 Download CSV Results (includes assessment columns)",
-        data=csv_data,
-        file_name=st.session_state.results_filename,
+        data=create_download_csv(st.session_state.results_df),
+        file_name=f"bot_queries_{timestamp}.csv",
         mime="text/csv",
-        key="download_btn_results"
+        key="download_btn_top"
     )
     
     # Add note about assessment columns
     st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
     
-    # Add "Run New Test" button and warning below the results
+    # Add "Run New Test" button and warning
     st.markdown("---")
     col1, col2 = st.columns([1, 3])
     with col1:
-        st.markdown('<div class="new-test-btn">', unsafe_allow_html=True)
-        if st.button("🔄 Run New Test", key="new_test_btn"):
-            reset_session()  # This will add a URL parameter and trigger a page reload
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('<a href="javascript:window.location.reload()" class="new-test-btn">🔄 Run New Test</a>', unsafe_allow_html=True)
     with col2:
         st.markdown('<div class="warning-box">This will delete prior test results. Be sure you have downloaded all test results before starting a new test.</div>', unsafe_allow_html=True)
+    
+    st.markdown("---")  # Add a divider
 
-else:
-    # Show the form to create a new test
-    # Create columns for inputs
-    input_col1, input_col2 = st.columns(2)
+# Main app logic for new tests
+# Create columns for inputs
+input_col1, input_col2 = st.columns(2)
 
-    with input_col1:
-        # API Connection Settings
-        st.subheader("Connection Settings")
-        base_url = st.text_input("Base URL", value="https://autotrial.microstrategy.com/MicroStrategyLibrary")
-        project_id = st.text_input("Project ID", value="205BABE083484404399FBBA37BAA874A")
-        bot_id = st.text_input("Bot ID", value="1DC776FB20744B85AFEE148D7C11C842")
+with input_col1:
+    # API Connection Settings
+    st.subheader("Connection Settings")
+    base_url = st.text_input("Base URL", value="https://autotrial.microstrategy.com/MicroStrategyLibrary")
+    project_id = st.text_input("Project ID", value="205BABE083484404399FBBA37BAA874A")
+    bot_id = st.text_input("Bot ID", value="1DC776FB20744B85AFEE148D7C11C842")
 
-    with input_col2:
-        # Authentication
-        st.subheader("Authentication")
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
+with input_col2:
+    # Authentication
+    st.subheader("Authentication")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    
+    # File upload
+    st.subheader("Questions File")
+    uploaded_file = st.file_uploader("Upload CSV file with questions", type="csv")
+
+# Process the uploaded file if we have one
+if uploaded_file is not None:
+    # Parse questions from the uploaded CSV
+    questions_list = parse_questions_from_csv(uploaded_file)
+    
+    if questions_list:
+        st.write(f"Found {len(questions_list)} questions in the CSV file")
         
-        # File upload - use the key from session state to force refresh
-        st.subheader("Questions File")
-        uploaded_file = st.file_uploader("Upload CSV file with questions", 
-                                      type="csv", 
-                                      key=st.session_state.file_uploader_key)
-
-    # Process the uploaded file if we have one
-    if uploaded_file is not None:
-        # Parse questions from the uploaded CSV
-        questions_list = parse_questions_from_csv(uploaded_file)
+        # Show first few questions
+        if len(questions_list) > 0:
+            st.subheader("Sample Questions:")
+            for i, q in enumerate(questions_list[:5]):
+                st.write(f"{i+1}. {q}")
+            if len(questions_list) > 5:
+                st.write("...")
         
-        if questions_list:
-            st.write(f"Found {len(questions_list)} questions in the CSV file")
-            
-            # Show first few questions
-            if len(questions_list) > 0:
-                st.subheader("Sample Questions:")
-                for i, q in enumerate(questions_list[:5]):
-                    st.write(f"{i+1}. {q}")
-                if len(questions_list) > 5:
-                    st.write("...")
-            
-            # Create a container to properly align the button to the right
-            btn_container = st.container()
-            with btn_container:
-                # Use HTML/CSS for right alignment
-                st.markdown('<div class="right-align">', unsafe_allow_html=True)
-                run_button_pressed = st.button("▶️ Run Queries", key="run_btn")
-                st.markdown('</div>', unsafe_allow_html=True)
-            
-            if run_button_pressed:
-                if not username or not password:
-                    st.error("Please enter your username and password")
-                else:
-                    # Run queries and get results
-                    results_df = run_queries(questions_list)
+        # Create a container to properly align the button to the right
+        btn_container = st.container()
+        with btn_container:
+            # Use HTML/CSS for right alignment
+            st.markdown('<div class="right-align">', unsafe_allow_html=True)
+            run_button_pressed = st.button("▶️ Run Queries", key="run_btn")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        if run_button_pressed:
+            if not username or not password:
+                st.error("Please enter your username and password")
+            else:
+                # Run queries and get results
+                results_df = run_queries(questions_list)
+                
+                if results_df is not None:
+                    # Store results in session state
+                    st.session_state.results_df = results_df
+                    st.session_state.results_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     
-                    if results_df is not None:
-                        # Store results in session state
-                        st.session_state.has_results = True
-                        st.session_state.results_df = results_df
-                        st.session_state.results_filename = f"bot_queries_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                        
-                        # Display results (hide assessment columns in the display)
-                        st.subheader("Results")
-                        display_df = results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
-                        st.dataframe(display_df, use_container_width=True)
-                        
-                        # Create download button for CSV with custom styling
-                        st.markdown('<div class="download-section">', unsafe_allow_html=True)
-                        csv_data = create_download_csv(results_df)
-                        
-                        st.download_button(
-                            label="📥 Download CSV Results (includes assessment columns)",
-                            data=csv_data,
-                            file_name=st.session_state.results_filename,
-                            mime="text/csv",
-                            key="download_btn_new"
-                        )
-                        st.markdown('</div>', unsafe_allow_html=True)
-                        
-                        # Add note about assessment columns
-                        st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
-                        
-                        # Immediately show the Run New Test button and warning
-                        st.markdown("---")
-                        col1, col2 = st.columns([1, 3])
-                        with col1:
-                            st.markdown('<div class="new-test-btn">', unsafe_allow_html=True)
-                            if st.button("🔄 Run New Test", key="new_test_after_run"):
-                                reset_session()  # This will add a URL parameter and trigger a page reload
-                            st.markdown('</div>', unsafe_allow_html=True)
-                        with col2:
-                            st.markdown('<div class="warning-box">This will delete prior test results. Be sure you have downloaded all test results before starting a new test.</div>', unsafe_allow_html=True)
-        else:
-            st.error("No questions found in the CSV file. Please make sure the file contains questions.")
+                    # Display results (hide assessment columns in the display)
+                    st.subheader("Results")
+                    display_df = results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
+                    st.dataframe(display_df, use_container_width=True)
+                    
+                    # Create download button for CSV with custom styling
+                    timestamp = st.session_state.results_timestamp
+                    st.download_button(
+                        label="📥 Download CSV Results (includes assessment columns)",
+                        data=create_download_csv(results_df),
+                        file_name=f"bot_queries_{timestamp}.csv",
+                        mime="text/csv",
+                        key="download_btn_new"
+                    )
+                    
+                    # Add note about assessment columns
+                    st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
+                    
+                    # Immediately show the Run New Test button and warning
+                    st.markdown("---")
+                    col1, col2 = st.columns([1, 3])
+                    with col1:
+                        st.markdown('<a href="javascript:window.location.reload()" class="new-test-btn">🔄 Run New Test</a>', unsafe_allow_html=True)
+                    with col2:
+                        st.markdown('<div class="warning-box">This will delete prior test results. Be sure you have downloaded all test results before starting a new test.</div>', unsafe_allow_html=True)
     else:
-        st.info("Please upload a CSV file with questions to continue.")
+        st.error("No questions found in the CSV file. Please make sure the file contains questions.")
+else:
+    st.info("Please upload a CSV file with questions to continue.")
