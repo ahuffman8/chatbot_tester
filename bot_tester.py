@@ -15,12 +15,12 @@ st.set_page_config(
 )
 
 # Check if we need to reset state based on query parameters
-if 'reset' in st.experimental_get_query_params():
+if "reset" in st.query_params:
     # Clear all session state if reset parameter is present
     for key in list(st.session_state.keys()):
         del st.session_state[key]
     # Remove the reset parameter
-    st.experimental_set_query_params()
+    st.query_params.clear()
 
 # Initialize session state variables if they don't exist
 if 'has_results' not in st.session_state:
@@ -35,7 +35,7 @@ if 'file_uploader_key' not in st.session_state:
 # Function to reset the session state via URL parameter
 def reset_session():
     # Set URL parameter to trigger reset on next load
-    st.experimental_set_query_params(reset='true')
+    st.query_params["reset"] = "true"
     # Rerun the app to apply the reset
     st.experimental_rerun()
 
