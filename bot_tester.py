@@ -6,7 +6,6 @@ import io
 import csv
 import re
 from datetime import datetime
-import base64
 
 # Page configuration
 st.set_page_config(
@@ -14,21 +13,6 @@ st.set_page_config(
     page_icon="🤖",
     layout="wide"
 )
-
-# Initialize session state to store results
-if 'results_df' not in st.session_state:
-    st.session_state.results_df = None
-if 'results_timestamp' not in st.session_state:
-    st.session_state.results_timestamp = None
-if 'show_new_test_form' not in st.session_state:
-    st.session_state.show_new_test_form = True
-
-# Function to create download link that works without refreshing
-def get_download_link(df, filename):
-    csv = df.to_csv(index=False)
-    b64 = base64.b64encode(csv.encode()).decode()
-    href = f'<a href="data:file/csv;base64,{b64}" download="{filename}" class="download-button">📥 Download CSV Results (includes assessment columns)</a>'
-    return href
 
 # App title and description
 st.title("Strategy Bot Query Tool")
@@ -40,6 +24,26 @@ then attach a CSV file with all the questions you want to ask and then click "Ru
 We'll let you know how long the process will take and then when you come back you'll be able to 
 download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
 """)
+
+# Create columns for inputs
+input_col1, input_col2 = st.columns(2)
+
+with input_col1:
+    # API Connection Settings
+    st.subheader("Connection Settings")
+    base_url = st.text_input("Base URL", value="https://autotrial.microstrategy.com/MicroStrategyLibrary")
+    project_id = st.text_input("Project ID", value="205BABE083484404399FBBA37BAA874A")
+    bot_id = st.text_input("Bot ID", value="1DC776FB20744B85AFEE148D7C11C842")
+
+with input_col2:
+    # Authentication
+    st.subheader("Authentication")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    
+    # File upload
+    st.subheader("Questions File")
+    uploaded_file = st.file_uploader("Upload CSV file with questions", type="csv")
 
 # Function to analyze SQL complexity and estimate latency
 def analyze_sql_complexity(sql_query):
@@ -428,18 +432,8 @@ st.markdown("""
     .stButton > button:hover {
         background-color: #45a049;
     }
-    .download-button {
-        display: inline-block;
+    .download-btn {
         background-color: #008CBA;
-        color: white;
-        font-size: 16px;
-        padding: 10px 20px;
-        border-radius: 8px;
-        text-decoration: none;
-        margin-top: 10px;
-    }
-    .download-button:hover {
-        background-color: #0073a8;
     }
     .stProgress > div > div {
         background-color: #4CAF50;
@@ -448,83 +442,10 @@ st.markdown("""
         text-align: right;
         width: 100%;
     }
-    .warning-box {
-        background-color: #fff3cd;
-        padding: 10px 15px;
-        border-left: 5px solid #ffc107;
-        margin: 10px 0;
-    }
-    .new-test-btn {
-        display: inline-block;
-        background-color: #dc3545;
-        color: white;
-        font-size: 16px;
-        padding: 10px 20px;
-        border-radius: 8px;
-        text-decoration: none;
-        margin-top: 10px;
-    }
-    .new-test-btn:hover {
-        background-color: #c82333;
-    }
 </style>
 """, unsafe_allow_html=True)
 
-# If we have stored results, display them first
-if st.session_state.results_df is not None:
-    st.header("Previous Test Results")
-    
-    # Display the dataframe
-    display_df = st.session_state.results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
-    st.dataframe(display_df, use_container_width=True)
-    
-    # Get timestamp for filename
-    timestamp = st.session_state.results_timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Create download button with standard Streamlit method
-    st.download_button(
-        label="📥 Download CSV Results (includes assessment columns)",
-        data=create_download_csv(st.session_state.results_df),
-        file_name=f"bot_queries_{timestamp}.csv",
-        mime="text/csv",
-        key="download_btn_top"
-    )
-    
-    # Add note about assessment columns
-    st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
-    
-    # Add "Run New Test" button and warning
-    st.markdown("---")
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        st.markdown('<a href="javascript:window.location.reload()" class="new-test-btn">🔄 Run New Test</a>', unsafe_allow_html=True)
-    with col2:
-        st.markdown('<div class="warning-box">This will delete prior test results. Be sure you have downloaded all test results before starting a new test.</div>', unsafe_allow_html=True)
-    
-    st.markdown("---")  # Add a divider
-
-# Main app logic for new tests
-# Create columns for inputs
-input_col1, input_col2 = st.columns(2)
-
-with input_col1:
-    # API Connection Settings
-    st.subheader("Connection Settings")
-    base_url = st.text_input("Base URL", value="https://autotrial.microstrategy.com/MicroStrategyLibrary")
-    project_id = st.text_input("Project ID", value="205BABE083484404399FBBA37BAA874A")
-    bot_id = st.text_input("Bot ID", value="1DC776FB20744B85AFEE148D7C11C842")
-
-with input_col2:
-    # Authentication
-    st.subheader("Authentication")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-    
-    # File upload
-    st.subheader("Questions File")
-    uploaded_file = st.file_uploader("Upload CSV file with questions", type="csv")
-
-# Process the uploaded file if we have one
+# Main app logic
 if uploaded_file is not None:
     # Parse questions from the uploaded CSV
     questions_list = parse_questions_from_csv(uploaded_file)
@@ -556,35 +477,28 @@ if uploaded_file is not None:
                 results_df = run_queries(questions_list)
                 
                 if results_df is not None:
-                    # Store results in session state
-                    st.session_state.results_df = results_df
-                    st.session_state.results_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    
                     # Display results (hide assessment columns in the display)
-                    st.subheader("Results")
                     display_df = results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
+                    st.subheader("Results")
                     st.dataframe(display_df, use_container_width=True)
                     
+                    # Generate CSV file for download (includes all columns)
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    csv_data = create_download_csv(results_df)
+                    
                     # Create download button for CSV with custom styling
-                    timestamp = st.session_state.results_timestamp
+                    st.markdown('<div class="download-section">', unsafe_allow_html=True)
                     st.download_button(
                         label="📥 Download CSV Results (includes assessment columns)",
-                        data=create_download_csv(results_df),
+                        data=csv_data,
                         file_name=f"bot_queries_{timestamp}.csv",
                         mime="text/csv",
-                        key="download_btn_new"
+                        key="download_btn"
                     )
+                    st.markdown('</div>', unsafe_allow_html=True)
                     
                     # Add note about assessment columns
                     st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
-                    
-                    # Immediately show the Run New Test button and warning
-                    st.markdown("---")
-                    col1, col2 = st.columns([1, 3])
-                    with col1:
-                        st.markdown('<a href="javascript:window.location.reload()" class="new-test-btn">🔄 Run New Test</a>', unsafe_allow_html=True)
-                    with col2:
-                        st.markdown('<div class="warning-box">This will delete prior test results. Be sure you have downloaded all test results before starting a new test.</div>', unsafe_allow_html=True)
     else:
         st.error("No questions found in the CSV file. Please make sure the file contains questions.")
 else:
