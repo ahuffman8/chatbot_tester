@@ -5,6 +5,7 @@ import time
 import io
 import csv
 import re
+import json
 from datetime import datetime
 
 # Page configuration
@@ -14,23 +15,21 @@ st.set_page_config(
     layout="wide"
 )
 
-# Initialize session state variables if they don't exist
-if 'results_df' not in st.session_state:
-    st.session_state.results_df = None
-if 'has_run' not in st.session_state:
-    st.session_state.has_run = False
-if 'timestamp' not in st.session_state:
-    st.session_state.timestamp = None
+# Initialize session state for test history
+if 'test_history' not in st.session_state:
+    st.session_state.test_history = []  # List to store all test results
+if 'selected_test' not in st.session_state:
+    st.session_state.selected_test = None  # Currently selected test index
 
 # App title and description
 st.title("Strategy Bot Query Tool")
 
 # Instructions
 st.markdown("""
-Use this site to send multiple queries to a bot and test for speed and accuracy. Add your bot information and credentials, 
+Use this site to send multiple queries to a bot and test for accuracy. Add your bot information and credentials, 
 then attach a CSV file with all the questions you want to ask and then click "Run Queries". 
-We'll let you know how long the process will take, and then when you come back you'll be able to 
-download a file with all the questions, answers, insights, interpretations, SQL queries, and response times to judge the performance of your bot.
+We'll let you know how long the process will take and then when you come back you'll be able to 
+download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
 """)
 
 # Create columns for inputs
@@ -51,7 +50,7 @@ with input_col2:
     
     # File upload
     st.subheader("Questions File")
-    uploaded_file = st.file_uploader("Upload CSV file with questions", type="csv", key="file_uploader")
+    uploaded_file = st.file_uploader("Upload CSV file with questions", type="csv")
 
 # Function to analyze SQL complexity and estimate latency
 def analyze_sql_complexity(sql_query):
@@ -60,9 +59,9 @@ def analyze_sql_complexity(sql_query):
     
     Complexity levels:
     - No SQL: 0.5 seconds
-    - Simple SQL: 3.1 seconds 
-    - Complex SQL: 5.5 seconds
-    - Very Complex SQL: 8.4 seconds
+    - Simple SQL: 3 seconds 
+    - Complex SQL: 5 seconds
+    - Very Complex SQL: 8 seconds
     """
     if not sql_query or len(sql_query.strip()) < 10:
         return 0.5, "No SQL"  # No meaningful SQL
@@ -101,21 +100,21 @@ def analyze_sql_complexity(sql_query):
     # Check for very complex patterns
     for pattern in very_complex_patterns:
         if re.search(pattern, sql_lower):
-            return 8.4, "Very Complex SQL"
+            return 8.0, "Very Complex SQL"
     
     # Check for complex patterns
     for pattern in complex_patterns:
         if re.search(pattern, sql_lower):
-            return 5.5, "Complex SQL"
+            return 5.0, "Complex SQL"
     
     # If we've gotten here, it's either simple or has unusual patterns
     # Let's check for simple patterns
     for pattern in simple_patterns:
         if re.search(pattern, sql_lower):
-            return 3.1, "Simple SQL"
+            return 3.0, "Simple SQL"
     
     # Default to simple if we can't determine (but it has some SQL)
-    return 4.0, "Some SQL"
+    return 3.0, "Simple SQL"
 
 # Chatbot client class
 class ChatbotClient:
@@ -300,7 +299,7 @@ def parse_questions_from_csv(file):
     return questions
 
 # Run queries function
-def run_queries(questions_list):
+def run_queries(questions_list, bot_name="Bot"):
     # Create results DataFrame with additional assessment columns
     results_df = pd.DataFrame(columns=[
         "Question", 
@@ -415,7 +414,22 @@ def run_queries(questions_list):
     progress_bar.progress(100)
     status_text.text("All questions processed!")
     
-    return results_df
+    # Create timestamp for test completion
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Create a test result entry
+    test_result = {
+        "timestamp": timestamp,
+        "bot_name": bot_name,
+        "num_questions": len(questions_list),
+        "results_df": results_df.to_dict(),  # Convert DataFrame to dict for storage
+        "filename": f"bot_queries_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    }
+    
+    # Add to test history
+    st.session_state.test_history.append(test_result)
+    
+    return results_df, len(st.session_state.test_history) - 1  # Return DataFrame and its index in history
 
 # Function to create a downloadable CSV
 def create_download_csv(df):
@@ -443,9 +457,6 @@ st.markdown("""
     .download-btn {
         background-color: #008CBA;
     }
-    .new-test-btn {
-        background-color: #f44336;
-    }
     .stProgress > div > div {
         background-color: #4CAF50;
     }
@@ -453,54 +464,72 @@ st.markdown("""
         text-align: right;
         width: 100%;
     }
+    .test-result-container {
+        padding: 15px;
+        margin: 15px 0;
+        border: 1px solid #ddd;
+        border-radius: 5px;
+        background-color: #f9f9f9;
+    }
+    .divider {
+        margin: 25px 0;
+        border-top: 1px solid #ddd;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# Function to handle starting a new test
-def start_new_test():
-    st.session_state.has_run = False
-    st.session_state.results_df = None
-    st.session_state.timestamp = None
-    # Also clear the file uploader
-    st.session_state.file_uploader = None
+# Display test history container if we have any test results
+if st.session_state.test_history:
+    with st.expander("View Previous Test Results", expanded=True):
+        st.subheader("Test History")
+        st.info("Your test results are saved in this session. Click on a test to view and download its results.")
+        
+        # Create tabs for different views
+        results_tab, new_test_tab = st.tabs(["Test Results", "Run New Test"])
+        
+        with results_tab:
+            # Create a selectbox to choose which test to view
+            test_options = [f"{test['timestamp']} - {test['bot_name']} ({test['num_questions']} questions)" 
+                          for test in st.session_state.test_history]
+            
+            selected_test_idx = st.selectbox("Select test to view:", 
+                                            options=range(len(test_options)),
+                                            format_func=lambda x: test_options[x])
+            
+            if selected_test_idx is not None:
+                # Get the selected test
+                selected_test = st.session_state.test_history[selected_test_idx]
+                
+                # Convert dictionary back to DataFrame
+                results_df = pd.DataFrame.from_dict(selected_test["results_df"])
+                
+                # Display results (hide assessment columns in the display)
+                display_df = results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
+                st.dataframe(display_df, use_container_width=True)
+                
+                # Create download button for CSV with custom styling
+                st.markdown('<div class="download-section">', unsafe_allow_html=True)
+                csv_data = create_download_csv(results_df)
+                st.download_button(
+                    label=f"📥 Download CSV Results from {selected_test['timestamp']}",
+                    data=csv_data,
+                    file_name=selected_test['filename'],
+                    mime="text/csv",
+                    key=f"download_btn_{selected_test_idx}"
+                )
+                st.markdown('</div>', unsafe_allow_html=True)
+                
+                # Add note about assessment columns
+                st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
+        
+        with new_test_tab:
+            st.info("Click below to start a new test with the current settings.")
+            if st.button("Run New Test", key="run_new_test"):
+                st.session_state.selected_test = None  # Clear selected test
+                st.experimental_rerun()  # Rerun to start fresh
 
-# Main app logic
-if st.session_state.has_run and st.session_state.results_df is not None:
-    # If we have previous results, display them and offer "New Test" button
-    st.success(f"Previous test results from {st.session_state.timestamp} are available.")
-    
-    # Create columns for button placement
-    new_test_col, _ = st.columns([0.2, 0.8])
-    
-    with new_test_col:
-        if st.button("Start New Test", key="new_test", 
-                    help="Clear previous results and start a new test", 
-                    type="primary"):
-            start_new_test()
-            st.experimental_rerun()
-    
-    # Display previous results
-    st.subheader("Previous Results")
-    display_df = st.session_state.results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
-    st.dataframe(display_df, use_container_width=True)
-    
-    # Create download button for CSV with custom styling
-    st.markdown('<div class="download-section">', unsafe_allow_html=True)
-    csv_data = create_download_csv(st.session_state.results_df)
-    st.download_button(
-        label="📥 Download CSV Results (includes assessment columns)",
-        data=csv_data,
-        file_name=f"bot_queries_{st.session_state.timestamp}.csv",
-        mime="text/csv",
-        key="download_btn"
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Add note about assessment columns
-    st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
-
-else:
-    # Normal flow for new tests
+# Main app logic for running new tests
+if not st.session_state.test_history or st.session_state.selected_test is None:
     if uploaded_file is not None:
         # Parse questions from the uploaded CSV
         questions_list = parse_questions_from_csv(uploaded_file)
@@ -516,6 +545,9 @@ else:
                 if len(questions_list) > 5:
                     st.write("...")
             
+            # Get optional bot name
+            bot_name = st.text_input("Bot Name (optional)", value="Bot")
+            
             # Create a container to properly align the button to the right
             btn_container = st.container()
             with btn_container:
@@ -529,13 +561,13 @@ else:
                     st.error("Please enter your username and password")
                 else:
                     # Run queries and get results
-                    results_df = run_queries(questions_list)
+                    results = run_queries(questions_list, bot_name)
                     
-                    if results_df is not None:
-                        # Store results in session state
-                        st.session_state.results_df = results_df
-                        st.session_state.has_run = True
-                        st.session_state.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    if results:
+                        results_df, test_idx = results
+                        
+                        # Set the selected test to the one we just ran
+                        st.session_state.selected_test = test_idx
                         
                         # Display results (hide assessment columns in the display)
                         display_df = results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
@@ -545,12 +577,16 @@ else:
                         # Create download button for CSV with custom styling
                         st.markdown('<div class="download-section">', unsafe_allow_html=True)
                         csv_data = create_download_csv(results_df)
+                        
+                        # Get the filename from the test history
+                        filename = st.session_state.test_history[test_idx]['filename']
+                        
                         st.download_button(
                             label="📥 Download CSV Results (includes assessment columns)",
                             data=csv_data,
-                            file_name=f"bot_queries_{st.session_state.timestamp}.csv",
+                            file_name=filename,
                             mime="text/csv",
-                            key="download_btn"
+                            key="download_btn_new"
                         )
                         st.markdown('</div>', unsafe_allow_html=True)
                         
