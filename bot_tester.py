@@ -5,6 +5,7 @@ import time
 import io
 import csv
 import re
+import json
 from datetime import datetime
 import traceback
 
@@ -45,6 +46,18 @@ with input_col2:
 # File upload
 st.subheader("Questions File")
 uploaded_file = st.file_uploader("Upload CSV file with questions", type="csv")
+
+# Initialize session state for checkpointing
+if 'results_df' not in st.session_state:
+    st.session_state.results_df = None
+if 'questions_processed' not in st.session_state:
+    st.session_state.questions_processed = 0
+if 'total_questions' not in st.session_state:
+    st.session_state.total_questions = 0
+if 'questions_list' not in st.session_state:
+    st.session_state.questions_list = []
+if 'processing_active' not in st.session_state:
+    st.session_state.processing_active = False
 
 # Function to analyze SQL complexity and estimate latency
 def analyze_sql_complexity(sql_query):
@@ -120,6 +133,7 @@ class ChatbotClient:
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
         self.auth_token = None
+        self.last_activity = time.time()
         
     def login(self, username, password):
         """Authenticate and store token in session headers"""
@@ -130,13 +144,14 @@ class ChatbotClient:
         }
         
         try:
-            response = self.session.post(url, json=payload)
+            response = self.session.post(url, json=payload, timeout=30)
             response.raise_for_status()
             
             # Extract token from headers
             self.auth_token = response.headers.get("X-MSTR-AuthToken")
             if self.auth_token:
                 self.session.headers.update({"X-MSTR-AuthToken": self.auth_token})
+                self.last_activity = time.time()
                 return True
             return False
         except Exception as e:
@@ -147,9 +162,21 @@ class ChatbotClient:
         """Refresh the session by logging in again"""
         st.warning("Refreshing session...")
         time.sleep(2)  # Brief delay before retry
-        return self.login(username, password)
+        success = self.login(username, password)
+        if success:
+            st.success("Session refreshed successfully!")
+        else:
+            st.error("Failed to refresh session")
+        return success
+    
+    def check_session_age(self, username, password, max_age=900):
+        """Check if session needs refreshing (15 minutes by default)"""
+        current_time = time.time()
+        if current_time - self.last_activity > max_age:
+            return self.refresh_session(username, password)
+        return True
         
-    def submit_question(self, question_text, max_retries=2):
+    def submit_question(self, question_text, username, password, max_retries=3):
         """Submit new question and return question ID with retries"""
         url = f"{self.base_url}/api/questions"
         headers = {
@@ -169,24 +196,34 @@ class ChatbotClient:
         retries = 0
         while retries <= max_retries:
             try:
-                response = self.session.post(url, headers=headers, json=payload)
+                # Always check session before submitting
+                if retries > 0 or not self.check_session_age(username, password):
+                    self.refresh_session(username, password)
+                
+                response = self.session.post(url, headers=headers, json=payload, timeout=30)
                 response.raise_for_status()
+                self.last_activity = time.time()
                 return response.json()["id"]
             except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 401 and retries < max_retries:
-                    # Unauthorized - refresh session and retry
-                    retries += 1
-                    if not self.refresh_session(username, password):
-                        raise Exception("Failed to refresh authentication token")
+                retries += 1
+                st.warning(f"HTTP error when submitting question (attempt {retries}/{max_retries+1}): {str(e)}")
+                if retries <= max_retries:
+                    time.sleep(2 * retries)  # Exponential backoff
                     continue
                 else:
                     raise
             except Exception as e:
-                raise Exception(f"Error submitting question: {str(e)}")
+                retries += 1
+                st.warning(f"Error submitting question (attempt {retries}/{max_retries+1}): {str(e)}")
+                if retries <= max_retries:
+                    time.sleep(2 * retries)  # Exponential backoff
+                    continue
+                else:
+                    raise Exception(f"Error submitting question after {max_retries+1} attempts: {str(e)}")
         
         raise Exception("Maximum retries exceeded when submitting question")
         
-    def poll_answer(self, question_id, timeout=58, interval=1):
+    def poll_answer(self, question_id, timeout=55, interval=1):
         """
         Poll for answer with basic first response timing
         Returns: (response_data, time_to_first_response, total_response_time)
@@ -201,7 +238,7 @@ class ChatbotClient:
                 raise TimeoutError("Polling timed out")
                 
             try:
-                response = self.session.get(url)
+                response = self.session.get(url, timeout=10)
                 
                 # If we get any response with status 200, mark first response time
                 if response.status_code == 200:
@@ -219,13 +256,14 @@ class ChatbotClient:
         # Continue polling until completion
         while (time.time() - start_time) < timeout:
             try:
-                response = self.session.get(url)
+                response = self.session.get(url, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
                     # Check if we have a complete answer
                     if "answers" in data and len(data["answers"]) > 0:
                         # Consider it complete if it has answer text
                         if "text" in data["answers"][0] and data["answers"][0]["text"]:
+                            self.last_activity = time.time()
                             return data, first_response_time, time.time() - start_time
                 
                 elif response.status_code != 202:
@@ -327,23 +365,42 @@ def parse_questions_from_csv(file):
     
     return questions
 
-# Run queries function
-def run_queries(questions_list):
-    # Create results DataFrame with additional assessment columns
-    results_df = pd.DataFrame(columns=[
-        "Question",
-        "Answer",
-        "Insights",  # Moved to be after Answer
-        "Interpretation",
-        "SQL",
-        "API Response Time (seconds)",  # Renamed from "Time to First Response"
-        "Total Response Time (seconds)",
-        "Estimated Time to First Response (seconds)",  # Renamed from "Estimated LLM Processing Time"
-        "Question Difficulty (1-5)",
-        "Pass/Fail",
-        "Answer Accuracy (1-5)"
-    ])
+# Function to create a downloadable CSV
+def create_download_csv(df):
+    # Create a CSV string from the DataFrame
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
+    csv_string = csv_buffer.getvalue()
+    
+    # Return the CSV data
+    return csv_string
 
+# Function to save checkpoint
+def save_checkpoint(progress_idx, df):
+    st.session_state.questions_processed = progress_idx
+    st.session_state.results_df = df.copy()
+
+# Run queries function with checkpointing
+def run_queries(questions_list, start_index=0):
+    # Create or load results DataFrame with additional assessment columns
+    if st.session_state.results_df is not None and start_index > 0:
+        results_df = st.session_state.results_df
+        st.info(f"Resuming from question {start_index+1}/{len(questions_list)}")
+    else:
+        results_df = pd.DataFrame(columns=[
+            "Question",
+            "Answer",
+            "Insights",
+            "Interpretation",
+            "SQL",
+            "API Response Time (seconds)",
+            "Total Response Time (seconds)",
+            "Estimated Time to First Response (seconds)",
+            "Question Difficulty (1-5)",
+            "Pass/Fail",
+            "Answer Accuracy (1-5)"
+        ])
+    
     # Initialize client
     client = ChatbotClient(base_url, bot_id, project_id)
 
@@ -363,144 +420,190 @@ def run_queries(questions_list):
     # Create progress elements
     progress_bar = st.progress(0)
     status_text = st.empty()
+    
+    # Heartbeat element to keep connection alive
+    heartbeat_text = st.empty()
+
+    # Calculate initial progress percentage
+    if start_index > 0:
+        initial_progress = int((start_index / len(questions_list)) * 100)
+    else:
+        initial_progress = 0
+    progress_bar.progress(initial_progress)
 
     # Calculate estimated time
     total_questions = len(questions_list)
-    delay_between_questions = 20
-    estimated_time = total_questions * (delay_between_questions + 15)
+    delay_between_questions = 15  # Reduced from 20 to improve throughput
+    estimated_time = (total_questions - start_index) * (delay_between_questions + 15)
     st.info(f"Estimated time: {estimated_time//60} minutes {estimated_time%60} seconds")
 
+    # Create a container for intermediate results
+    results_container = st.container()
+    
+    # Create a container for downloaded results
+    download_container = st.container()
+    with download_container:
+        dl_placeholder = st.empty()
+
+    # Set processing as active
+    st.session_state.processing_active = True
+
     # Process each question
-    for i, question in enumerate(questions_list):
-        # Update progress
-        progress = int((i / total_questions) * 100)
-        progress_bar.progress(progress)
-        status_text.text(f"Processing question {i+1}/{total_questions}: {question}")
+    try:
+        for i in range(start_index, len(questions_list)):
+            question = questions_list[i]
+            
+            # Update heartbeat
+            current_time = datetime.now().strftime("%H:%M:%S")
+            heartbeat_text.info(f"Heartbeat: {current_time} - Processing question {i+1}/{total_questions}")
+            
+            # Update progress
+            progress = int(((i + 1) / total_questions) * 100)
+            progress_bar.progress(progress)
+            status_text.text(f"Processing question {i+1}/{total_questions}: {question}")
 
-        # Try to refresh token every 5 questions
-        if i > 0 and i % 5 == 0:
-            try:
-                client.refresh_session(username, password)
-            except:
-                pass  # Continue even if refresh fails
+            # Try to refresh token periodically
+            if i > start_index and i % 3 == 0:
+                try:
+                    client.refresh_session(username, password)
+                except:
+                    pass  # Continue even if refresh fails
 
-        try:
-            # Submit question with retry logic
             try:
-                question_id = client.submit_question(question)
-            except Exception as submit_error:
-                # Try refreshing the session once if there's an error
-                if client.refresh_session(username, password):
-                    question_id = client.submit_question(question)
-                else:
-                    raise submit_error
+                # Submit question with retry logic
+                question_id = client.submit_question(question, username, password)
+                
+                # Poll for answer with timing information (will timeout after 55 seconds)
+                result, first_response_time, total_response_time = client.poll_answer(question_id)
+                
+                # Extract data
+                answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
+                interpretation, sql, insights = client.extract_data_from_response(result)
+                
+                # Analyze SQL complexity and get estimated latency
+                latency, complexity = analyze_sql_complexity(sql)
+                
+                # Calculate estimated time to first response
+                estimated_first_response = first_response_time + latency
+                
+                # Add to DataFrame with empty assessment columns
+                results_df.loc[len(results_df)] = [
+                    question,
+                    answer_text,
+                    insights,
+                    interpretation,
+                    sql,
+                    round(first_response_time, 2),
+                    round(total_response_time, 2),
+                    round(estimated_first_response, 2),
+                    "",  # Question Difficulty - left empty for user to fill
+                    "",  # Pass/Fail - left empty for user to fill
+                    ""   # Answer Accuracy - left empty for user to fill
+                ]
+                
+                with results_container:
+                    st.success(f"""✓ Got answer for question {i+1}:
+                    - API Response Time: {first_response_time:.2f}s
+                    - Total Response Time: {total_response_time:.2f}s
+                    - SQL Complexity: {complexity} (+{latency:.1f}s)
+                    - Estimated Time to First Response: {estimated_first_response:.2f}s""")
+                
+            except TimeoutError as e:
+                # Handle timeout specifically
+                with results_container:
+                    st.warning(f"⚠️ Question {i+1} timed out after 55 seconds. Skipping to next question.")
+                
+                # Add timeout to DataFrame with empty assessment columns
+                results_df.loc[len(results_df)] = [
+                    question,
+                    "TIMEOUT: Question processing exceeded 55 seconds",
+                    "",
+                    "",
+                    "",
+                    55,  # Set to timeout value
+                    55,  # Set to timeout value
+                    55,  # Set to timeout value
+                    "",  # Question Difficulty
+                    "Skip",  # Mark as skipped
+                    ""   # Answer Accuracy
+                ]
+                
+                # Try to refresh the session after a timeout
+                try:
+                    client.refresh_session(username, password)
+                except:
+                    pass  # Continue even if refresh fails
+                
+            except Exception as e:
+                # Get detailed error information
+                error_details = traceback.format_exc()
+                with results_container:
+                    st.error(f"Error processing question {i+1}: {str(e)}")
+                    st.code(error_details, language="python")
+                
+                # Add error to DataFrame with empty assessment columns
+                results_df.loc[len(results_df)] = [
+                    question,
+                    f"ERROR: {str(e)}",
+                    "",
+                    "",
+                    "",
+                    0,
+                    0,
+                    0,
+                    "",  # Question Difficulty
+                    "Fail",  # Auto-fill as fail since there was an error
+                    ""   # Answer Accuracy
+                ]
+                
+                # Try to refresh the session after an error
+                try:
+                    client.refresh_session(username, password)
+                except:
+                    pass  # Continue even if refresh fails
             
-            # Poll for answer with timing information (will timeout after 58 seconds)
-            result, first_response_time, total_response_time = client.poll_answer(question_id)
+            # Save checkpoint after each question
+            save_checkpoint(i+1, results_df)
             
-            # Extract data
-            answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
-            interpretation, sql, insights = client.extract_data_from_response(result)
-            
-            # Analyze SQL complexity and get estimated latency
-            latency, complexity = analyze_sql_complexity(sql)
-            
-            # Calculate estimated time to first response
-            estimated_first_response = first_response_time + latency
-            
-            # Add to DataFrame with empty assessment columns
-            results_df.loc[len(results_df)] = [
-                question,
-                answer_text,
-                insights,
-                interpretation,
-                sql,
-                round(first_response_time, 2),
-                round(total_response_time, 2),
-                round(estimated_first_response, 2),
-                "",  # Question Difficulty - left empty for user to fill
-                "",  # Pass/Fail - left empty for user to fill
-                ""   # Answer Accuracy - left empty for user to fill
-            ]
-            
-            st.success(f"""✓ Got answer for question {i+1}:
-            - API Response Time: {first_response_time:.2f}s
-            - Total Response Time: {total_response_time:.2f}s
-            - SQL Complexity: {complexity} (+{latency:.1f}s)
-            - Estimated Time to First Response: {estimated_first_response:.2f}s""")
-            
-        except TimeoutError as e:
-            # Handle timeout specifically
-            st.warning(f"⚠️ Question {i+1} timed out after 58 seconds. Skipping to next question.")
-            
-            # Add timeout to DataFrame with empty assessment columns
-            results_df.loc[len(results_df)] = [
-                question,
-                "TIMEOUT: Question processing exceeded 58 seconds",
-                "",
-                "",
-                "",
-                58,  # Set to timeout value
-                58,  # Set to timeout value
-                58,  # Set to timeout value
-                "",  # Question Difficulty
-                "Skip",  # Mark as skipped
-                ""   # Answer Accuracy
-            ]
-            
-            # Try to refresh the session after a timeout
-            try:
-                client.refresh_session(username, password)
-            except:
-                pass  # Continue even if refresh fails
-            
-        except Exception as e:
-            # Get detailed error information
-            error_details = traceback.format_exc()
-            st.error(f"Error processing question {i+1}: {str(e)}")
-            st.code(error_details, language="python")
-            
-            # Add error to DataFrame with empty assessment columns
-            results_df.loc[len(results_df)] = [
-                question,
-                f"ERROR: {str(e)}",
-                "",
-                "",
-                "",
-                0,
-                0,
-                0,
-                "",  # Question Difficulty
-                "Fail",  # Auto-fill as fail since there was an error
-                ""   # Answer Accuracy
-            ]
-            
-            # Try to refresh the session after an error
-            try:
-                client.refresh_session(username, password)
-            except:
-                pass  # Continue even if refresh fails
+            # Update download link after each question
+            with download_container:
+                # Generate CSV file for download (includes all columns)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                csv_data = create_download_csv(results_df)
+                
+                dl_placeholder.download_button(
+                    label=f"📥 Download CSV Results ({i+1}/{total_questions} questions)",
+                    data=csv_data,
+                    file_name=f"bot_queries_{timestamp}.csv",
+                    mime="text/csv",
+                    key=f"download_btn_{i}_{timestamp}"
+                )
+                
+                # Force Streamlit to redraw by introducing a small delay
+                time.sleep(0.1)
 
-        # Delay before next question
-        if i < total_questions - 1:
-            status_text.text(f"Waiting {delay_between_questions} seconds before next question...")
-            time.sleep(delay_between_questions)
-
-    # Update progress to 100%
-    progress_bar.progress(100)
-    status_text.text("All questions processed!")
+            # Delay before next question - reduced delay for better efficiency
+            if i < len(questions_list) - 1:
+                status_text.text(f"Waiting {delay_between_questions} seconds before next question...")
+                time.sleep(delay_between_questions)
+    
+    except Exception as e:
+        # Handle any unexpected errors
+        st.error(f"Unexpected error during processing: {str(e)}")
+        st.code(traceback.format_exc(), language="python")
+    
+    finally:
+        # Set processing as inactive
+        st.session_state.processing_active = False
+        
+        # Update progress to 100%
+        progress_bar.progress(100)
+        status_text.text("All questions processed!")
+        
+        # Final save
+        save_checkpoint(len(questions_list), results_df)
 
     return results_df
-
-# Function to create a downloadable CSV
-def create_download_csv(df):
-    # Create a CSV string from the DataFrame
-    csv_buffer = io.StringIO()
-    df.to_csv(csv_buffer, index=False)
-    csv_string = csv_buffer.getvalue()
-    
-    # Return the CSV data
-    return csv_string
 
 # Add custom CSS styling for your interface
 st.markdown("""
@@ -518,55 +621,100 @@ if uploaded_file is not None:
     # Parse questions from the uploaded CSV
     questions_list = parse_questions_from_csv(uploaded_file)
     
-    if questions_list:
-        st.write(f"Found {len(questions_list)} questions in the CSV file")
+    # Store questions in session state
+    if questions_list and len(questions_list) > 0 and questions_list != st.session_state.questions_list:
+        st.session_state.questions_list = questions_list
+        st.session_state.questions_processed = 0  # Reset progress when questions change
+        st.session_state.total_questions = len(questions_list)
+    
+    if st.session_state.questions_list:
+        st.write(f"Found {len(st.session_state.questions_list)} questions in the CSV file")
         
         # Show first few questions
-        if len(questions_list) > 0:
+        if len(st.session_state.questions_list) > 0:
             st.subheader("Sample Questions:")
-            for i, q in enumerate(questions_list[:5]):
+            for i, q in enumerate(st.session_state.questions_list[:5]):
                 st.write(f"{i+1}. {q}")
-            if len(questions_list) > 5:
+            if len(st.session_state.questions_list) > 5:
                 st.write("...")
         
-        # Create a container to properly align the button to the right
-        btn_container = st.container()
-        with btn_container:
-            # Use HTML/CSS for right alignment
-            st.markdown('<div class="right-align">', unsafe_allow_html=True)
-            run_button_pressed = st.button("▶️ Run Queries", key="run_btn")
-            st.markdown('</div>', unsafe_allow_html=True)
-        
-        if run_button_pressed:
-            if not username or not password:
-                st.error("Please enter your username and password")
-            else:
-                # Run queries and get results
-                results_df = run_queries(questions_list)
+        # Show progress if there's any
+        if st.session_state.questions_processed > 0 and st.session_state.questions_processed < st.session_state.total_questions:
+            st.info(f"Progress: {st.session_state.questions_processed}/{st.session_state.total_questions} questions processed")
+            
+            # Show partial results
+            if st.session_state.results_df is not None:
+                st.subheader("Current Results")
+                display_df = st.session_state.results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
+                st.dataframe(display_df, use_container_width=True)
                 
-                if results_df is not None:
-                    # Display results (hide assessment columns in the display)
-                    display_df = results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
-                    st.subheader("Results")
-                    st.dataframe(display_df, use_container_width=True)
-                    
-                    # Generate CSV file for download (includes all columns)
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    csv_data = create_download_csv(results_df)
-                    
-                    # Create download button for CSV with custom styling
-                    st.markdown('<div class="download-section">', unsafe_allow_html=True)
-                    st.download_button(
-                        label="📥 Download CSV Results (includes assessment columns)",
-                        data=csv_data,
-                        file_name=f"bot_queries_{timestamp}.csv",
-                        mime="text/csv",
-                        key="download_btn"
-                    )
-                    st.markdown('</div>', unsafe_allow_html=True)
-                    
-                    # Add note about assessment columns
-                    st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
+                # Generate CSV file for download
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                csv_data = create_download_csv(st.session_state.results_df)
+                
+                # Create download button for intermediate results
+                st.download_button(
+                    label=f"📥 Download Partial Results ({st.session_state.questions_processed}/{st.session_state.total_questions} questions)",
+                    data=csv_data,
+                    file_name=f"bot_queries_partial_{timestamp}.csv",
+                    mime="text/csv",
+                    key="download_partial"
+                )
+        
+        # Create buttons for running or resuming
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.session_state.processing_active:
+                st.warning("Processing in progress... Please wait.")
+            elif st.session_state.questions_processed > 0 and st.session_state.questions_processed < st.session_state.total_questions:
+                resume_button = st.button("▶️ Resume Processing", key="resume_btn", 
+                                        help=f"Resume from question {st.session_state.questions_processed+1}")
+                restart_button = st.button("🔄 Start Over", key="restart_btn")
+                
+                if resume_button:
+                    if not username or not password:
+                        st.error("Please enter your username and password")
+                    else:
+                        # Run queries and resume from checkpoint
+                        results_df = run_queries(st.session_state.questions_list, st.session_state.questions_processed)
+                
+                if restart_button:
+                    # Reset progress
+                    st.session_state.questions_processed = 0
+                    st.session_state.results_df = None
+                    st.experimental_rerun()
+            else:
+                run_button = st.button("▶️ Run Queries", key="run_btn")
+                
+                if run_button:
+                    if not username or not password:
+                        st.error("Please enter your username and password")
+                    else:
+                        # Run queries from the beginning
+                        results_df = run_queries(st.session_state.questions_list)
+                        
+                        if results_df is not None and len(results_df) == st.session_state.total_questions:
+                            # Display final results (hide assessment columns in the display)
+                            display_df = results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
+                            st.subheader("Final Results")
+                            st.dataframe(display_df, use_container_width=True)
+                            
+                            # Generate CSV file for download (includes all columns)
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            csv_data = create_download_csv(results_df)
+                            
+                            # Create download button for CSV with custom styling
+                            st.download_button(
+                                label="📥 Download CSV Results (includes assessment columns)",
+                                data=csv_data,
+                                file_name=f"bot_queries_{timestamp}.csv",
+                                mime="text/csv",
+                                key="download_final"
+                            )
+                            
+                            # Add note about assessment columns
+                            st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
     else:
         st.error("No questions found in the CSV file. Please make sure the file contains questions.")
 else:
