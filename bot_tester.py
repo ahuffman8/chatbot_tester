@@ -33,6 +33,8 @@ if 'status_messages' not in st.session_state:
     st.session_state.status_messages = []
 if 'processing_complete' not in st.session_state:
     st.session_state.processing_complete = False
+if 'csv_data' not in st.session_state:
+    st.session_state.csv_data = None
 
 # App title and description
 st.title("Strategy Bot Query Tool")
@@ -67,6 +69,27 @@ with input_col2:
 # File upload
 st.subheader("Questions File")
 uploaded_file = st.file_uploader("Upload CSV file with questions", type="csv")
+
+# CSV Data Display and Download Section - MOVED TO TOP
+if st.session_state.processing_complete and st.session_state.csv_data is not None:
+    st.markdown('<div style="background-color: #e9f7ef; padding: 20px; border-radius: 10px; margin: 20px 0; border: 2px solid #4CAF50; text-align: center;">', unsafe_allow_html=True)
+    st.subheader("📥 Download Results")
+    
+    # Create timestamp for filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Display download button
+    st.download_button(
+        label="Download Complete Results CSV",
+        data=st.session_state.csv_data,
+        file_name=f"bot_queries_{timestamp}.csv",
+        mime="text/csv",
+        key="download_btn_top",
+        use_container_width=True
+    )
+    
+    st.markdown("The CSV includes all results plus columns for your assessment.")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # Function to analyze SQL complexity and estimate latency
 def analyze_sql_complexity(sql_query):
@@ -348,7 +371,7 @@ def process_single_question(args):
             "status": "failed"
         }
 
-# Function to update progress and results
+# Function to update progress and results and save CSV immediately
 def update_results(future):
     try:
         result = future.result()
@@ -397,6 +420,11 @@ def update_results(future):
             st.session_state.status_messages.append(message)
             if len(st.session_state.status_messages) > 10:
                 st.session_state.status_messages.pop(0)
+            
+            # Immediately update CSV data
+            csv_buffer = io.StringIO()
+            st.session_state.results_df.to_csv(csv_buffer, index=False)
+            st.session_state.csv_data = csv_buffer.getvalue()
                 
     except Exception as e:
         # Handle unexpected errors
@@ -435,32 +463,13 @@ def run_queries_parallel(questions_list, max_workers):
     # Mark processing as complete
     st.session_state.processing_complete = True
     
+    # Make sure CSV data is available
+    if st.session_state.results_df is not None and not st.session_state.results_df.empty:
+        csv_buffer = io.StringIO()
+        st.session_state.results_df.to_csv(csv_buffer, index=False)
+        st.session_state.csv_data = csv_buffer.getvalue()
+    
     return st.session_state.results_df
-
-# Function to create a downloadable CSV
-def create_download_csv(df):
-    # Create a CSV string from the DataFrame
-    csv_buffer = io.StringIO()
-    df.to_csv(csv_buffer, index=False)
-    csv_string = csv_buffer.getvalue()
-    return csv_string
-
-# Add custom CSS styling for your interface - FIXED THE SYNTAX ERROR HERE
-st.markdown("""
-<style>
-.stButton > button { background-color: #4CAF50; color: white; font-size: 18px; padding: 10px 24px; border-radius: 8px; }
-.stButton > button:hover { background-color: #45a049; }
-.download-btn { background-color: #008CBA; }
-.stProgress > div > div { background-color: #4CAF50; }
-.right-align { text-align: right; width: 100%; }
-.status-box { background-color: #f8f9fa; border: 1px solid #e9ecef; border-radius: 5px; padding: 10px; height: 200px; overflow-y: auto; margin-bottom: 20px; }
-.status-item { margin-bottom: 5px; }
-.success-item { color: #28a745; }
-.error-item { color: #dc3545; }
-.download-section { background-color: #e9f7ef; padding: 20px; border-radius: 10px; margin: 20px 0; border: 2px solid #4CAF50; text-align: center; }
-.completion-banner { background-color: #d4edda; color: #155724; padding: 15px; border-radius: 5px; margin-bottom: 20px; text-align: center; }
-</style>
-""", unsafe_allow_html=True)
 
 # Main app logic
 if uploaded_file is not None:
@@ -504,10 +513,10 @@ if uploaded_file is not None:
             
             # Show status messages
             if st.session_state.status_messages:
-                status_html = '<div class="status-box">'
+                status_html = '<div style="background-color: #f8f9fa; border: 1px solid #e9ecef; border-radius: 5px; padding: 10px; height: 200px; overflow-y: auto; margin-bottom: 20px;">'
                 for msg in st.session_state.status_messages:
                     css_class = "success-item" if msg.startswith("✅") else "error-item"
-                    status_html += f'<div class="status-item {css_class}">{msg}</div>'
+                    status_html += f'<div style="margin-bottom: 5px; color: {"#28a745" if msg.startswith("✅") else "#dc3545"};">{msg}</div>'
                 status_html += '</div>'
                 status_box.markdown(status_html, unsafe_allow_html=True)
         
@@ -519,6 +528,7 @@ if uploaded_file is not None:
             st.session_state.progress = 0
             st.session_state.status_messages = []
             st.session_state.processing_complete = False
+            st.session_state.csv_data = None
             # Use st.rerun() instead of experimental_rerun
             st.rerun()
         
@@ -540,52 +550,63 @@ if uploaded_file is not None:
         # Show completion banner if processing is complete
         if st.session_state.processing_complete:
             st.markdown("""
-            <div class="completion-banner">
+            <div style="background-color: #d4edda; color: #155724; padding: 15px; 
+                     border-radius: 5px; margin-bottom: 20px; text-align: center;">
                 <h3>🎉 All questions have been processed successfully!</h3>
-                <p>Scroll down to see results and download the CSV file.</p>
+                <p>Your results are ready! You can download them using the button at the top of this page.</p>
             </div>
             """, unsafe_allow_html=True)
         
         # Always display results if available
         if st.session_state.results_df is not None and not st.session_state.results_df.empty:
             # Display results (hide assessment columns in the display)
-            display_df = st.session_state.results_df.drop(columns=[
-                "Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"
-            ])
-            
-            # Count rows
-            row_count = len(display_df)
-            
-            st.subheader(f"Results ({row_count} questions processed)")
-            st.dataframe(display_df, use_container_width=True)
-            
-            # Generate CSV file for download (includes all columns)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            csv_data = create_download_csv(st.session_state.results_df)
-            
-            # Create prominent download section
-            st.markdown('<div class="download-section">', unsafe_allow_html=True)
-            st.subheader("Download Results")
-            st.markdown(f"**{row_count} questions** have been processed and are ready for download.")
-            
-            # More prominent download button
-            st.download_button(
-                label="📥 Download Complete Results CSV",
-                data=csv_data,
-                file_name=f"bot_queries_{timestamp}.csv",
-                mime="text/csv",
-                key="download_btn",
-                use_container_width=True
-            )
-            
-            # Additional helpful text
-            st.markdown("""
-            The CSV includes all results plus columns for your assessment:
-            - Question Difficulty (1-5)
-            - Pass/Fail
-            - Answer Accuracy (1-5)
-            """)
-            st.markdown('</div>', unsafe_allow_html=True)
+            try:
+                display_df = st.session_state.results_df.drop(columns=[
+                    "Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"
+                ])
+                
+                # Count rows
+                row_count = len(display_df)
+                
+                st.subheader(f"Results ({row_count} questions processed)")
+                st.dataframe(display_df, use_container_width=True)
+                
+                # Create ADDITIONAL download section at the bottom
+                st.markdown('<div style="background-color: #e9f7ef; padding: 20px; border-radius: 10px; margin: 20px 0; border: 2px solid #4CAF50; text-align: center;">', unsafe_allow_html=True)
+                st.subheader("Download Results")
+                
+                # Generate CSV file for download (includes all columns)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                
+                # Use the pre-generated CSV data
+                if st.session_state.csv_data is not None:
+                    st.download_button(
+                        label="📥 Download Complete Results CSV",
+                        data=st.session_state.csv_data,
+                        file_name=f"bot_queries_{timestamp}.csv",
+                        mime="text/csv",
+                        key="download_btn_bottom",
+                        use_container_width=True
+                    )
+                    
+                    # Add a direct text area with the CSV data for copy-paste
+                    st.subheader("CSV Data (copy-paste if download doesn't work)")
+                    st.text_area("CSV Data", value=st.session_state.csv_data[:5000] + "...", height=200)
+                else:
+                    st.warning("CSV data is not available. Try refreshing the page.")
+                
+                st.markdown('</div>', unsafe_allow_html=True)
+            except Exception as e:
+                st.error(f"Error displaying results: {str(e)}")
+                
+                # Debug information
+                st.write("Debug info:")
+                st.write(f"DataFrame shape: {st.session_state.results_df.shape}")
+                st.write(f"DataFrame columns: {list(st.session_state.results_df.columns)}")
+                
+                # Alternative display approach
+                st.write("Raw DataFrame:")
+                st.dataframe(st.session_state.results_df)
     else:
         st.error("No questions found in the CSV file. Please make sure the file contains questions.")
 else:
