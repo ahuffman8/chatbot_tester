@@ -6,7 +6,6 @@ import io
 import csv
 import re
 from datetime import datetime
-import threading
 
 # Page configuration
 st.set_page_config(
@@ -15,25 +14,15 @@ st.set_page_config(
     layout="wide"
 )
 
-# Initialize session state
-if 'results' not in st.session_state:
-    st.session_state.results = []
-if 'processing' not in st.session_state:
-    st.session_state.processing = False
-if 'completed' not in st.session_state:
-    st.session_state.completed = False
-if 'processed_count' not in st.session_state:
-    st.session_state.processed_count = 0
-if 'total_count' not in st.session_state:
-    st.session_state.total_count = 0
-
 # App title and description
 st.title("Strategy Bot Query Tool")
 
 # Instructions
 st.markdown("""
 Use this site to send multiple queries to a bot and test for accuracy. Add your bot information and credentials,
-then attach a CSV file with all the questions you want to ask and click "Run Queries".
+then attach a CSV file with all the questions you want to ask and then click "Run Queries".
+We'll let you know how long the process will take and then when you come back you'll be able to
+download a file with all the questions, answers, interpretations, SQL queries, and response times to judge the performance of your bot.
 """)
 
 # Create columns for inputs
@@ -45,9 +34,6 @@ with input_col1:
     base_url = st.text_input("Base URL", value="https://autotrial.microstrategy.com/MicroStrategyLibrary")
     project_id = st.text_input("Project ID", value="205BABE083484404399FBBA37BAA874A")
     bot_id = st.text_input("Bot ID", value="1DC776FB20744B85AFEE148D7C11C842")
-    
-    # Parallel processing settings
-    workers = st.slider("Workers", min_value=1, max_value=5, value=3)
 
 with input_col2:
     # Authentication
@@ -59,110 +45,193 @@ with input_col2:
 st.subheader("Questions File")
 uploaded_file = st.file_uploader("Upload CSV file with questions", type="csv")
 
-# Parse questions function
-def parse_questions_from_csv(file):
-    questions = []
-    file.seek(0)
-    try:
-        df = pd.read_csv(file)
-        # Use first column
-        if len(df.columns) > 0:
-            questions = df.iloc[:,0].dropna().tolist()
-    except:
-        try:
-            # Try simple CSV parsing
-            file.seek(0)
-            text_io = io.TextIOWrapper(file, encoding='utf8')
-            reader = csv.reader(text_io)
-            for row in reader:
-                if row and row[0].strip():
-                    questions.append(row[0].strip())
-        except Exception as e:
-            st.error(f"Error parsing CSV: {e}")
+# Function to analyze SQL complexity and estimate latency
+def analyze_sql_complexity(sql_query):
+    """
+    Analyze SQL complexity and return estimated latency in seconds.
     
-    return questions
+    Complexity levels:
+    
+    No SQL: 0.5 seconds
+    Simple SQL: 3 seconds
+    Complex SQL: 5 seconds
+    Very Complex SQL: 8 seconds
+    """
+    if not sql_query or len(sql_query.strip()) < 10:
+        return 0.5, "No SQL"  # No meaningful SQL
+        
+    # Convert to lowercase for easier pattern matching
+    sql_lower = sql_query.lower()
+    
+    # Very complex patterns (multiple joins, complex functions, subqueries, window functions)
+    very_complex_patterns = [
+        r'with\s+.\s+as',        # CTE (Common Table Expressions)
+        r'over\s\(',              # Window functions
+        r'(select.+from.+)\s+select', # Subqueries
+        r'join.*join.*join',       # Multiple joins (3+)
+        r'case\s+when.*case\s+when', # Nested CASE statements
+        r'union|intersect|except'  # Set operations
+    ]
+    
+    # Complex patterns (joins, aggregations, group by)
+    complex_patterns = [
+        r'join',                   # Any kind of join
+        r'group\s+by',             # Grouping
+        r'having',                 # Having clause
+        r'order\s+by.*order\s+by', # Multiple order by clauses
+        r'distinct',               # Distinct operations
+        r'sum\(|avg\(|count\(|max\(|min\(' # Aggregations
+    ]
+    
+    # Simple patterns (basic where clauses, single table, order by)
+    simple_patterns = [
+        r'where',                  # Where clause
+        r'order\s+by',             # Order by
+        r'limit',                  # Limit clause
+        r'select.*from'            # Basic select
+    ]
+    
+    # Check for very complex patterns
+    for pattern in very_complex_patterns:
+        if re.search(pattern, sql_lower):
+            return 8.0, "Very Complex SQL"
+            
+    # Check for complex patterns
+    for pattern in complex_patterns:
+        if re.search(pattern, sql_lower):
+            return 5.0, "Complex SQL"
+            
+    # If we've gotten here, it's either simple or has unusual patterns
+    # Let's check for simple patterns
+    for pattern in simple_patterns:
+        if re.search(pattern, sql_lower):
+            return 3.0, "Simple SQL"
+            
+    # Default to simple if we can't determine (but it has some SQL)
+    return 3.0, "Simple SQL"
 
-# Simple function to process a single question
-def process_question(question, base_url, project_id, bot_id, username, password):
-    try:
-        # Create session
-        session = requests.Session()
-        session.headers.update({"Content-Type": "application/json"})
+# Chatbot client class
+class ChatbotClient:
+    def __init__(self, base_url, bot_id, project_id):
+        self.base_url = base_url
+        self.bot_id = bot_id
+        self.project_id = project_id
+        self.session = requests.Session()
+        self.session.headers.update({"Content-Type": "application/json"})
         
-        # Login
-        login_url = f"{base_url}/api/auth/login"
-        login_payload = {"username": username, "password": password}
-        login_response = session.post(login_url, json=login_payload)
-        login_response.raise_for_status()
+    def login(self, username, password):
+        """Authenticate and store token in session headers"""
+        url = f"{self.base_url}/api/auth/login"
+        payload = {
+            "username": username,
+            "password": password
+        }
         
-        # Get auth token
-        auth_token = login_response.headers.get("X-MSTR-AuthToken")
-        if not auth_token:
-            return {"question": question, "answer": "ERROR: Login failed", "status": "failed"}
+        response = self.session.post(url, json=payload)
+        response.raise_for_status()
         
-        session.headers.update({"X-MSTR-AuthToken": auth_token})
+        # Extract token from headers
+        auth_token = response.headers.get("X-MSTR-AuthToken")
+        if auth_token:
+            self.session.headers.update({"X-MSTR-AuthToken": auth_token})
+            return True
+        return False
         
-        # Submit question
-        question_url = f"{base_url}/api/questions"
-        question_headers = {"Prefer": "respond-async", "X-MSTR-ProjectID": project_id}
-        question_payload = {
-            "text": question,
+    def submit_question(self, question_text):
+        """Submit new question and return question ID"""
+        url = f"{self.base_url}/api/questions"
+        headers = {
+            "Prefer": "respond-async",
+            "X-MSTR-ProjectID": self.project_id
+        }
+        payload = {
+            "text": question_text,
             "textOnly": True,
-            "bots": [{"id": bot_id, "projectId": project_id}],
+            "bots": [{
+                "id": self.bot_id,
+                "projectId": self.project_id
+            }],
             "history": []
         }
         
-        question_response = session.post(question_url, headers=question_headers, json=question_payload)
-        question_response.raise_for_status()
-        question_id = question_response.json()["id"]
+        response = self.session.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        return response.json()["id"]
         
-        # Poll for answer
+    def poll_answer(self, question_id, timeout=58, interval=1):
+        """
+        Poll for answer with basic first response timing
+        Returns: (response_data, time_to_first_response, total_response_time)
+        """
         start_time = time.time()
-        poll_url = f"{base_url}/api/questions/{question_id}"
-        answer_data = None
+        url = f"{self.base_url}/api/questions/{question_id}"
+        first_response_time = None
         
-        # Poll for up to 5 minutes
-        while time.time() - start_time < 300:
-            poll_response = session.get(poll_url)
+        # Try to get initial response quickly (shorter intervals)
+        for _ in range(30):  # Try for 3 seconds (30 * 0.1)
+            if time.time() - start_time > timeout:
+                raise TimeoutError("Polling timed out")
+                
+            response = self.session.get(url)
             
-            if poll_response.status_code == 200:
-                answer_data = poll_response.json()
-                if "answers" in answer_data and len(answer_data["answers"]) > 0:
-                    if "text" in answer_data["answers"][0] and answer_data["answers"][0]["text"]:
-                        break
-            elif poll_response.status_code != 202:
-                return {"question": question, "answer": f"ERROR: Poll failed with code {poll_response.status_code}", "status": "failed"}
-            
-            time.sleep(1)
-            
-        if not answer_data or "answers" not in answer_data or len(answer_data["answers"]) == 0:
-            return {"question": question, "answer": "ERROR: No answer received after timeout", "status": "failed"}
-            
-        # Extract answer text
-        answer_text = answer_data["answers"][0].get("text", "No text in answer")
+            # If we get any response with status 200, mark first response time
+            if response.status_code == 200:
+                first_response_time = time.time() - start_time
+                break
+                
+            time.sleep(0.1)
         
-        # Extract SQL if available
-        sql = ""
-        if "answers" in answer_data and len(answer_data["answers"]) > 0:
-            if "sqlQueries" in answer_data["answers"][0] and len(answer_data["answers"][0]["sqlQueries"]) > 0:
-                sql = answer_data["answers"][0]["sqlQueries"][0]
+        # If we still don't have first response time, set it equal to whenever we get the final answer
+        if first_response_time is None:
+            first_response_time = time.time() - start_time
+            
+        # Continue polling until completion
+        while (time.time() - start_time) < timeout:
+            response = self.session.get(url)
+            if response.status_code == 200:
+                data = response.json()
+                # Check if we have a complete answer
+                if "answers" in data and len(data["answers"]) > 0:
+                    # Consider it complete if it has answer text
+                    if "text" in data["answers"][0] and data["answers"][0]["text"]:
+                        return data, first_response_time, time.time() - start_time
+            
+            elif response.status_code != 202:
+                response.raise_for_status()
         
-        # Extract interpretation if available
+            time.sleep(interval)
+        
+        raise TimeoutError(f"Polling timed out after {timeout} seconds")
+        
+    def extract_data_from_response(self, response_data):
+        """
+        Extract interpretation, SQL, and insights from the response.
+        Returns: (interpretation, sql, insights)
+        """
         interpretation = ""
-        if "answers" in answer_data and len(answer_data["answers"]) > 0:
-            if "queries" in answer_data["answers"][0] and len(answer_data["answers"][0]["queries"]) > 0:
-                query = answer_data["answers"][0]["queries"][0]
+        sql = ""
+        insights = ""
+        
+        if "answers" in response_data and len(response_data["answers"]) > 0:
+            answer = response_data["answers"][0]
+            
+            # Extract SQL queries
+            if "sqlQueries" in answer and len(answer["sqlQueries"]) > 0:
+                sql = answer["sqlQueries"][0]
+            
+            # Extract interpretation from queries
+            if "queries" in answer and len(answer["queries"]) > 0:
+                query = answer["queries"][0]
                 if "explanation" in query:
                     interpretation = query["explanation"]
-        
-        # Extract insights if available
-        insights = ""
-        if "answers" in answer_data and len(answer_data["answers"]) > 0:
-            answer = answer_data["answers"][0]
+            
+            # Extract insights if available
             if "insights" in answer:
+                # Handle insights based on data structure (could be string or object)
                 if isinstance(answer["insights"], str):
                     insights = answer["insights"]
                 elif isinstance(answer["insights"], list) and len(answer["insights"]) > 0:
+                    # If it's a list of objects, try to extract text from each
                     insights_texts = []
                     for insight in answer["insights"]:
                         if isinstance(insight, str):
@@ -171,41 +240,214 @@ def process_question(question, base_url, project_id, bot_id, username, password)
                             insights_texts.append(insight["text"])
                     insights = "\n".join(insights_texts)
         
-        # Return successful result
-        return {
-            "question": question,
-            "answer": answer_text,
-            "sql": sql,
-            "interpretation": interpretation,
-            "insights": insights,
-            "time": round(time.time() - start_time, 2),
-            "status": "success"
-        }
-    
-    except Exception as e:
-        return {"question": question, "answer": f"ERROR: {str(e)}", "status": "failed"}
+        return interpretation, sql, insights
 
-# Background worker function
-def background_worker(questions, base_url, project_id, bot_id, username, password):
-    st.session_state.processing = True
-    st.session_state.processed_count = 0
-    st.session_state.total_count = len(questions)
-    st.session_state.results = []
+# Parse the CSV file to extract questions - fixed for binary file handling
+def parse_questions_from_csv(file):
+    questions = []
     
+    # Reset file pointer to beginning
+    file.seek(0)
+    
+    try:
+        # Convert bytes to string for CSV reader
+        text_content = io.TextIOWrapper(file, encoding='utf-8')
+        csv_reader = csv.reader(text_content)
+        rows = list(csv_reader)
+        
+        # If we have at least one row
+        if rows:
+            # Check if the first row looks like a header
+            first_row = rows[0]
+            possible_headers = ["question", "questions", "query", "queries"]
+            header_index = -1
+            
+            for i, cell in enumerate(first_row):
+                if cell.lower() in possible_headers:
+                    header_index = i
+                    break
+                    
+            # If we found a header, use that column from row 1 onwards
+            if header_index >= 0:
+                for row in rows[1:]:
+                    if len(row) > header_index and row[header_index].strip():
+                        questions.append(row[header_index].strip())
+            else:
+                # No header found, assume first column has questions including first row
+                for row in rows:
+                    if row and row[0].strip():
+                        questions.append(row[0].strip())
+                        
+    except Exception as e:
+        st.error(f"Error reading CSV file: {str(e)}")
+        # If CSV reading fails, try pandas as fallback
+        try:
+            file.seek(0)
+            csv_data = pd.read_csv(file)  # Pandas handles binary files automatically
+            # If we have at least one column, take the first column
+            if len(csv_data.columns) > 0:
+                questions = csv_data.iloc[:, 0].dropna().tolist()
+        except Exception as inner_e:
+            st.error(f"Fallback CSV reading also failed: {str(inner_e)}")
+    
+    return questions
+
+# Run queries function
+def run_queries(questions_list):
+    # Create results DataFrame with additional assessment columns
+    results_df = pd.DataFrame(columns=[
+        "Question",
+        "Answer",
+        "Insights",  # Moved to be after Answer
+        "Interpretation",
+        "SQL",
+        "API Response Time (seconds)",  # Renamed from "Time to First Response"
+        "Total Response Time (seconds)",
+        "Estimated Time to First Response (seconds)",  # Renamed from "Estimated LLM Processing Time"
+        "Question Difficulty (1-5)",
+        "Pass/Fail",
+        "Answer Accuracy (1-5)"
+    ])
+
+    # Initialize client
+    client = ChatbotClient(base_url, bot_id, project_id)
+
+    # Login
+    with st.spinner("Logging in..."):
+        try:
+            login_success = client.login(username, password)
+            if not login_success:
+                st.error("Login failed. Please check your credentials.")
+                return None
+        except Exception as e:
+            st.error(f"Login error: {str(e)}")
+            return None
+
+    st.success("Login successful!")
+
+    # Create progress elements
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    # Calculate estimated time
+    total_questions = len(questions_list)
+    delay_between_questions = 20
+    estimated_time = total_questions * (delay_between_questions + 15)
+    st.info(f"Estimated time: {estimated_time//60} minutes {estimated_time%60} seconds")
+
     # Process each question
-    for q in questions:
-        result = process_question(q, base_url, project_id, bot_id, username, password)
-        
-        # Update session state
-        st.session_state.results.append(result)
-        st.session_state.processed_count += 1
-        
-        # Add a small delay to avoid overwhelming the server
-        time.sleep(1)
+    for i, question in enumerate(questions_list):
+        # Update progress
+        progress = int((i / total_questions) * 100)
+        progress_bar.progress(progress)
+        status_text.text(f"Processing question {i+1}/{total_questions}: {question}")
+
+        try:
+            # Submit question
+            question_id = client.submit_question(question)
+            
+            # Poll for answer with timing information (will timeout after 58 seconds)
+            result, first_response_time, total_response_time = client.poll_answer(question_id)
+            
+            # Extract data
+            answer_text = result["answers"][0]["text"] if "answers" in result and len(result["answers"]) > 0 else "No answer provided"
+            interpretation, sql, insights = client.extract_data_from_response(result)
+            
+            # Analyze SQL complexity and get estimated latency
+            latency, complexity = analyze_sql_complexity(sql)
+            
+            # Calculate estimated time to first response
+            estimated_first_response = first_response_time + latency
+            
+            # Add to DataFrame with empty assessment columns
+            results_df.loc[len(results_df)] = [
+                question,
+                answer_text,
+                insights,
+                interpretation,
+                sql,
+                round(first_response_time, 2),
+                round(total_response_time, 2),
+                round(estimated_first_response, 2),
+                "",  # Question Difficulty - left empty for user to fill
+                "",  # Pass/Fail - left empty for user to fill
+                ""   # Answer Accuracy - left empty for user to fill
+            ]
+            
+            st.success(f"""✓ Got answer for question {i+1}:
+            - API Response Time: {first_response_time:.2f}s
+            - Total Response Time: {total_response_time:.2f}s
+            - SQL Complexity: {complexity} (+{latency:.1f}s)
+            - Estimated Time to First Response: {estimated_first_response:.2f}s""")
+            
+        except TimeoutError as e:
+            # Handle timeout specifically
+            st.warning(f"⚠️ Question {i+1} timed out after 58 seconds. Skipping to next question.")
+            
+            # Add timeout to DataFrame with empty assessment columns
+            results_df.loc[len(results_df)] = [
+                question,
+                "TIMEOUT: Question processing exceeded 58 seconds",
+                "",
+                "",
+                "",
+                58,  # Set to timeout value
+                58,  # Set to timeout value
+                58,  # Set to timeout value
+                "",  # Question Difficulty
+                "Skip",  # Mark as skipped
+                ""   # Answer Accuracy
+            ]
+            
+        except Exception as e:
+            st.error(f"Error processing question {i+1}: {str(e)}")
+            
+            # Add error to DataFrame with empty assessment columns
+            results_df.loc[len(results_df)] = [
+                question,
+                f"ERROR: {str(e)}",
+                "",
+                "",
+                "",
+                0,
+                0,
+                0,
+                "",  # Question Difficulty
+                "Fail",  # Auto-fill as fail since there was an error
+                ""   # Answer Accuracy
+            ]
+
+        # Delay before next question
+        if i < total_questions - 1:
+            status_text.text(f"Waiting {delay_between_questions} seconds before next question...")
+            time.sleep(delay_between_questions)
+
+    # Update progress to 100%
+    progress_bar.progress(100)
+    status_text.text("All questions processed!")
+
+    return results_df
+
+# Function to create a downloadable CSV
+def create_download_csv(df):
+    # Create a CSV string from the DataFrame
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
+    csv_string = csv_buffer.getvalue()
     
-    # Mark as completed
-    st.session_state.completed = True
-    st.session_state.processing = False
+    # Return the CSV data
+    return csv_string
+
+# Add custom CSS styling for your interface
+st.markdown("""
+<style>
+.stButton > button { background-color: #4CAF50; color: white; font-size: 18px; padding: 10px 24px; border-radius: 8px; }
+.stButton > button:hover { background-color: #45a049; }
+.download-btn { background-color: #008CBA; }
+.stProgress > div > div { background-color: #4CAF50; }
+.right-align { text-align: right; width: 100%; }
+</style>
+""", unsafe_allow_html=True)
 
 # Main app logic
 if uploaded_file is not None:
@@ -223,102 +465,44 @@ if uploaded_file is not None:
             if len(questions_list) > 5:
                 st.write("...")
         
-        # Create buttons
-        col1, col2 = st.columns(2)
+        # Create a container to properly align the button to the right
+        btn_container = st.container()
+        with btn_container:
+            # Use HTML/CSS for right alignment
+            st.markdown('<div class="right-align">', unsafe_allow_html=True)
+            run_button_pressed = st.button("▶️ Run Queries", key="run_btn")
+            st.markdown('</div>', unsafe_allow_html=True)
         
-        with col1:
-            run_button_pressed = st.button("▶️ Run Queries", key="run_btn", 
-                                          disabled=st.session_state.processing)
-            
-        with col2:
-            reset_button_pressed = st.button("🔄 Reset", key="reset_btn")
-        
-        # Show progress
-        if st.session_state.processing or st.session_state.completed:
-            progress_pct = int((st.session_state.processed_count / st.session_state.total_count) * 100) if st.session_state.total_count > 0 else 0
-            st.progress(progress_pct)
-            st.write(f"Processed {st.session_state.processed_count} of {st.session_state.total_count} questions")
-        
-        # Handle reset
-        if reset_button_pressed:
-            st.session_state.results = []
-            st.session_state.processing = False
-            st.session_state.completed = False
-            st.session_state.processed_count = 0
-            st.session_state.total_count = 0
-            st.experimental_rerun()
-        
-        # Handle run button
         if run_button_pressed:
             if not username or not password:
                 st.error("Please enter your username and password")
             else:
-                # Start the background processing
-                thread = threading.Thread(
-                    target=background_worker,
-                    args=(questions_list, base_url, project_id, bot_id, username, password)
-                )
-                thread.daemon = True
-                thread.start()
-                st.info("Processing started in the background. This page will update automatically.")
-                time.sleep(1)  # Give the thread time to start
-                st.experimental_rerun()
-        
-        # Show download button when completed
-        if st.session_state.completed and st.session_state.results:
-            st.success("✅ All questions have been processed successfully!")
-            
-            # Create DataFrame from results
-            results_df = pd.DataFrame([
-                {
-                    "Question": r["question"],
-                    "Answer": r["answer"],
-                    "Insights": r.get("insights", ""),
-                    "Interpretation": r.get("interpretation", ""),
-                    "SQL": r.get("sql", ""),
-                    "Response Time (seconds)": r.get("time", 0),
-                    "Question Difficulty (1-5)": "",
-                    "Pass/Fail": "Fail" if r["status"] == "failed" else "",
-                    "Answer Accuracy (1-5)": ""
-                }
-                for r in st.session_state.results
-            ])
-            
-            # Create downloadable CSV
-            csv_buffer = io.StringIO()
-            results_df.to_csv(csv_buffer, index=False)
-            csv_data = csv_buffer.getvalue()
-            
-            # Show the download button
-            st.download_button(
-                label=f"📥 Download Results CSV ({len(results_df)} questions)",
-                data=csv_data,
-                file_name=f"bot_queries_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-                key="download_btn"
-            )
-            
-            # Also show results preview
-            st.subheader("Results Preview")
-            st.dataframe(results_df.head(10))
-        
-        # Show partial results during processing
-        elif st.session_state.processing and st.session_state.results:
-            # Show current results
-            st.subheader(f"Partial Results ({len(st.session_state.results)} questions processed so far)")
-            
-            # Create DataFrame from current results
-            partial_df = pd.DataFrame([
-                {
-                    "Question": r["question"],
-                    "Answer": r["answer"],
-                    "Status": r["status"],
-                    "Time": r.get("time", 0)
-                }
-                for r in st.session_state.results
-            ])
-            
-            st.dataframe(partial_df)
+                # Run queries and get results
+                results_df = run_queries(questions_list)
+                
+                if results_df is not None:
+                    # Display results (hide assessment columns in the display)
+                    display_df = results_df.drop(columns=["Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"])
+                    st.subheader("Results")
+                    st.dataframe(display_df, use_container_width=True)
+                    
+                    # Generate CSV file for download (includes all columns)
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    csv_data = create_download_csv(results_df)
+                    
+                    # Create download button for CSV with custom styling
+                    st.markdown('<div class="download-section">', unsafe_allow_html=True)
+                    st.download_button(
+                        label="📥 Download CSV Results (includes assessment columns)",
+                        data=csv_data,
+                        file_name=f"bot_queries_{timestamp}.csv",
+                        mime="text/csv",
+                        key="download_btn"
+                    )
+                    st.markdown('</div>', unsafe_allow_html=True)
+                    
+                    # Add note about assessment columns
+                    st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
     else:
         st.error("No questions found in the CSV file. Please make sure the file contains questions.")
 else:
