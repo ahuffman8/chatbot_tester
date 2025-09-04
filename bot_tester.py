@@ -6,7 +6,6 @@ import io
 import csv
 import re
 from datetime import datetime
-import json
 import concurrent.futures
 from threading import Lock
 
@@ -32,6 +31,8 @@ if 'progress' not in st.session_state:
     st.session_state.progress = 0
 if 'status_messages' not in st.session_state:
     st.session_state.status_messages = []
+if 'processing_complete' not in st.session_state:
+    st.session_state.processing_complete = False
 
 # App title and description
 st.title("Strategy Bot Query Tool")
@@ -404,6 +405,9 @@ def update_results(future):
 
 # Function to run queries in parallel
 def run_queries_parallel(questions_list, max_workers):
+    # Mark as not complete at the start
+    st.session_state.processing_complete = False
+    
     # Create a ThreadPoolExecutor for parallel processing
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Create futures for each question
@@ -412,6 +416,11 @@ def run_queries_parallel(questions_list, max_workers):
         # Only process questions that haven't been processed yet
         unprocessed = [i for i in range(len(questions_list)) if i not in st.session_state.processed_questions]
         
+        # If no unprocessed questions, mark as complete
+        if not unprocessed:
+            st.session_state.processing_complete = True
+            return st.session_state.results_df
+            
         # Submit all questions to the executor
         for i in unprocessed:
             question = questions_list[i]
@@ -422,6 +431,9 @@ def run_queries_parallel(questions_list, max_workers):
         
         # Wait for all futures to complete
         concurrent.futures.wait(futures)
+    
+    # Mark processing as complete
+    st.session_state.processing_complete = True
     
     return st.session_state.results_df
 
@@ -446,6 +458,10 @@ st.markdown("""
 .status-item { margin-bottom: 5px; }
 .success-item { color: #28a745; }
 .error-item { color: #dc3545; }
+.download-section { background-color: #e9f7ef; padding: 20px; border-radius: 10px; margin: 20px 0; 
+                   border: 2px solid #4CAF50; text-align: center; }
+.completion-banner { background-color: #d4edda; color: #155724; padding: 15px; 
+                     border-radius: 5px; margin-bottom: 20px; text-align: center; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -505,6 +521,7 @@ if uploaded_file is not None:
             st.session_state.processing_started = False
             st.session_state.progress = 0
             st.session_state.status_messages = []
+            st.session_state.processing_complete = False
             st.experimental_rerun()
         
         # Handle run button
@@ -516,37 +533,61 @@ if uploaded_file is not None:
                 st.session_state.processing_started = True
                 
                 # Run queries in parallel
-                results_df = run_queries_parallel(questions_list, max_concurrent)
+                with st.spinner("Processing questions in parallel..."):
+                    results_df = run_queries_parallel(questions_list, max_concurrent)
                 
-                # No need to update session state as it's updated in callbacks
-                st.success("🎉 All questions have been processed!")
+                # Force rerun to update the UI
+                st.experimental_rerun()
         
-        # Display results if available
+        # Show completion banner if processing is complete
+        if st.session_state.processing_complete:
+            st.markdown("""
+            <div class="completion-banner">
+                <h3>🎉 All questions have been processed successfully!</h3>
+                <p>Scroll down to see results and download the CSV file.</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Always display results if available
         if st.session_state.results_df is not None and not st.session_state.results_df.empty:
             # Display results (hide assessment columns in the display)
             display_df = st.session_state.results_df.drop(columns=[
                 "Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"
             ])
-            st.subheader("Results")
+            
+            # Count rows
+            row_count = len(display_df)
+            
+            st.subheader(f"Results ({row_count} questions processed)")
             st.dataframe(display_df, use_container_width=True)
             
             # Generate CSV file for download (includes all columns)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             csv_data = create_download_csv(st.session_state.results_df)
             
-            # Create download button for CSV with custom styling
+            # Create prominent download section
             st.markdown('<div class="download-section">', unsafe_allow_html=True)
+            st.subheader("Download Results")
+            st.markdown(f"**{row_count} questions** have been processed and are ready for download.")
+            
+            # More prominent download button
             st.download_button(
-                label="📥 Download CSV Results (includes assessment columns)",
+                label="📥 Download Complete Results CSV",
                 data=csv_data,
                 file_name=f"bot_queries_{timestamp}.csv",
                 mime="text/csv",
-                key="download_btn"
+                key="download_btn",
+                use_container_width=True
             )
-            st.markdown('</div>', unsafe_allow_html=True)
             
-            # Add note about assessment columns
-            st.info("The downloaded CSV includes additional columns for manual assessment: 'Question Difficulty (1-5)', 'Pass/Fail', and 'Answer Accuracy (1-5)'.")
+            # Additional helpful text
+            st.markdown("""
+            The CSV includes all results plus columns for your assessment:
+            - Question Difficulty (1-5)
+            - Pass/Fail
+            - Answer Accuracy (1-5)
+            """)
+            st.markdown('</div>', unsafe_allow_html=True)
     else:
         st.error("No questions found in the CSV file. Please make sure the file contains questions.")
 else:
