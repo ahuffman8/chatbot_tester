@@ -21,8 +21,6 @@ if 'results_df' not in st.session_state:
     st.session_state.results_df = None
 if 'processed_questions' not in st.session_state:
     st.session_state.processed_questions = set()
-if 'processing_started' not in st.session_state:
-    st.session_state.processing_started = False
 if 'questions_list' not in st.session_state:
     st.session_state.questions_list = []
 if 'results_lock' not in st.session_state:
@@ -69,27 +67,6 @@ with input_col2:
 # File upload
 st.subheader("Questions File")
 uploaded_file = st.file_uploader("Upload CSV file with questions", type="csv")
-
-# CSV Data Display and Download Section - MOVED TO TOP
-if st.session_state.processing_complete and st.session_state.csv_data is not None:
-    st.markdown('<div style="background-color: #e9f7ef; padding: 20px; border-radius: 10px; margin: 20px 0; border: 2px solid #4CAF50; text-align: center;">', unsafe_allow_html=True)
-    st.subheader("📥 Download Results")
-    
-    # Create timestamp for filename
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Display download button
-    st.download_button(
-        label="Download Complete Results CSV",
-        data=st.session_state.csv_data,
-        file_name=f"bot_queries_{timestamp}.csv",
-        mime="text/csv",
-        key="download_btn_top",
-        use_container_width=True
-    )
-    
-    st.markdown("The CSV includes all results plus columns for your assessment.")
-    st.markdown('</div>', unsafe_allow_html=True)
 
 # Function to analyze SQL complexity and estimate latency
 def analyze_sql_complexity(sql_query):
@@ -471,6 +448,13 @@ def run_queries_parallel(questions_list, max_workers):
     
     return st.session_state.results_df
 
+# Function to create a downloadable CSV
+def create_download_csv(df):
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
+    csv_string = csv_buffer.getvalue()
+    return csv_string
+
 # Main app logic
 if uploaded_file is not None:
     # Check if we have questions in session state already
@@ -529,7 +513,6 @@ if uploaded_file is not None:
             st.session_state.status_messages = []
             st.session_state.processing_complete = False
             st.session_state.csv_data = None
-            # Use st.rerun() instead of experimental_rerun
             st.rerun()
         
         # Handle run button
@@ -544,69 +527,52 @@ if uploaded_file is not None:
                 with st.spinner("Processing questions in parallel..."):
                     results_df = run_queries_parallel(questions_list, max_concurrent)
                 
-                # Use st.rerun() instead of experimental_rerun
                 st.rerun()
         
-        # Show completion banner if processing is complete
-        if st.session_state.processing_complete:
+        # Show completion banner with DIRECT DOWNLOAD BUTTON if processing is complete
+        if st.session_state.processing_complete and st.session_state.csv_data is not None:
+            # Generate timestamp for filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Calculate row count
+            row_count = len(st.session_state.processed_questions)
+            
             st.markdown("""
             <div style="background-color: #d4edda; color: #155724; padding: 15px; 
-                     border-radius: 5px; margin-bottom: 20px; text-align: center;">
+                     border-radius: 5px; margin: 20px 0; text-align: center;">
                 <h3>🎉 All questions have been processed successfully!</h3>
-                <p>Your results are ready! You can download them using the button at the top of this page.</p>
+                <p>Download your results using the button below:</p>
             </div>
             """, unsafe_allow_html=True)
-        
-        # Always display results if available
-        if st.session_state.results_df is not None and not st.session_state.results_df.empty:
-            # Display results (hide assessment columns in the display)
+            
+            # Put the download button directly in the UI here
+            st.download_button(
+                label=f"📥 Download Results CSV ({row_count} questions)",
+                data=st.session_state.csv_data,
+                file_name=f"bot_queries_{timestamp}.csv",
+                mime="text/csv",
+                key="download_btn_main",
+                use_container_width=True
+            )
+            
+            # Also display results
             try:
                 display_df = st.session_state.results_df.drop(columns=[
                     "Question Difficulty (1-5)", "Pass/Fail", "Answer Accuracy (1-5)"
                 ])
                 
-                # Count rows
-                row_count = len(display_df)
+                st.subheader("Results Preview")
+                st.dataframe(display_df.head(10), use_container_width=True)
                 
-                st.subheader(f"Results ({row_count} questions processed)")
-                st.dataframe(display_df, use_container_width=True)
-                
-                # Create ADDITIONAL download section at the bottom
-                st.markdown('<div style="background-color: #e9f7ef; padding: 20px; border-radius: 10px; margin: 20px 0; border: 2px solid #4CAF50; text-align: center;">', unsafe_allow_html=True)
-                st.subheader("Download Results")
-                
-                # Generate CSV file for download (includes all columns)
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                
-                # Use the pre-generated CSV data
-                if st.session_state.csv_data is not None:
-                    st.download_button(
-                        label="📥 Download Complete Results CSV",
-                        data=st.session_state.csv_data,
-                        file_name=f"bot_queries_{timestamp}.csv",
-                        mime="text/csv",
-                        key="download_btn_bottom",
-                        use_container_width=True
-                    )
-                    
-                    # Add a direct text area with the CSV data for copy-paste
-                    st.subheader("CSV Data (copy-paste if download doesn't work)")
-                    st.text_area("CSV Data", value=st.session_state.csv_data[:5000] + "...", height=200)
-                else:
-                    st.warning("CSV data is not available. Try refreshing the page.")
-                
-                st.markdown('</div>', unsafe_allow_html=True)
-            except Exception as e:
-                st.error(f"Error displaying results: {str(e)}")
-                
-                # Debug information
-                st.write("Debug info:")
-                st.write(f"DataFrame shape: {st.session_state.results_df.shape}")
-                st.write(f"DataFrame columns: {list(st.session_state.results_df.columns)}")
-                
-                # Alternative display approach
-                st.write("Raw DataFrame:")
-                st.dataframe(st.session_state.results_df)
+                # Add a copy-paste text area as backup
+                with st.expander("Can't download? Copy CSV data here"):
+                    st.text_area("CSV Data (copy and paste to a text file)", 
+                                value=st.session_state.csv_data[:5000] + 
+                                ("..." if len(st.session_state.csv_data) > 5000 else ""), 
+                                height=200)
+            except:
+                # Fallback to showing raw data
+                st.warning("Could not display results preview. Try downloading the CSV directly.")
     else:
         st.error("No questions found in the CSV file. Please make sure the file contains questions.")
 else:
