@@ -6,6 +6,7 @@ import io
 import csv
 import re
 from datetime import datetime
+import traceback
 
 # Page configuration
 st.set_page_config(
@@ -118,6 +119,7 @@ class ChatbotClient:
         self.project_id = project_id
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
+        self.auth_token = None
         
     def login(self, username, password):
         """Authenticate and store token in session headers"""
@@ -127,18 +129,28 @@ class ChatbotClient:
             "password": password
         }
         
-        response = self.session.post(url, json=payload)
-        response.raise_for_status()
+        try:
+            response = self.session.post(url, json=payload)
+            response.raise_for_status()
+            
+            # Extract token from headers
+            self.auth_token = response.headers.get("X-MSTR-AuthToken")
+            if self.auth_token:
+                self.session.headers.update({"X-MSTR-AuthToken": self.auth_token})
+                return True
+            return False
+        except Exception as e:
+            st.error(f"Login error: {str(e)}")
+            return False
+    
+    def refresh_session(self, username, password):
+        """Refresh the session by logging in again"""
+        st.warning("Refreshing session...")
+        time.sleep(2)  # Brief delay before retry
+        return self.login(username, password)
         
-        # Extract token from headers
-        auth_token = response.headers.get("X-MSTR-AuthToken")
-        if auth_token:
-            self.session.headers.update({"X-MSTR-AuthToken": auth_token})
-            return True
-        return False
-        
-    def submit_question(self, question_text):
-        """Submit new question and return question ID"""
+    def submit_question(self, question_text, max_retries=2):
+        """Submit new question and return question ID with retries"""
         url = f"{self.base_url}/api/questions"
         headers = {
             "Prefer": "respond-async",
@@ -154,9 +166,25 @@ class ChatbotClient:
             "history": []
         }
         
-        response = self.session.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        return response.json()["id"]
+        retries = 0
+        while retries <= max_retries:
+            try:
+                response = self.session.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+                return response.json()["id"]
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 401 and retries < max_retries:
+                    # Unauthorized - refresh session and retry
+                    retries += 1
+                    if not self.refresh_session(username, password):
+                        raise Exception("Failed to refresh authentication token")
+                    continue
+                else:
+                    raise
+            except Exception as e:
+                raise Exception(f"Error submitting question: {str(e)}")
+        
+        raise Exception("Maximum retries exceeded when submitting question")
         
     def poll_answer(self, question_id, timeout=58, interval=1):
         """
@@ -172,12 +200,15 @@ class ChatbotClient:
             if time.time() - start_time > timeout:
                 raise TimeoutError("Polling timed out")
                 
-            response = self.session.get(url)
-            
-            # If we get any response with status 200, mark first response time
-            if response.status_code == 200:
-                first_response_time = time.time() - start_time
-                break
+            try:
+                response = self.session.get(url)
+                
+                # If we get any response with status 200, mark first response time
+                if response.status_code == 200:
+                    first_response_time = time.time() - start_time
+                    break
+            except:
+                pass  # Ignore errors during quick polling
                 
             time.sleep(0.1)
         
@@ -187,17 +218,21 @@ class ChatbotClient:
             
         # Continue polling until completion
         while (time.time() - start_time) < timeout:
-            response = self.session.get(url)
-            if response.status_code == 200:
-                data = response.json()
-                # Check if we have a complete answer
-                if "answers" in data and len(data["answers"]) > 0:
-                    # Consider it complete if it has answer text
-                    if "text" in data["answers"][0] and data["answers"][0]["text"]:
-                        return data, first_response_time, time.time() - start_time
-            
-            elif response.status_code != 202:
-                response.raise_for_status()
+            try:
+                response = self.session.get(url)
+                if response.status_code == 200:
+                    data = response.json()
+                    # Check if we have a complete answer
+                    if "answers" in data and len(data["answers"]) > 0:
+                        # Consider it complete if it has answer text
+                        if "text" in data["answers"][0] and data["answers"][0]["text"]:
+                            return data, first_response_time, time.time() - start_time
+                
+                elif response.status_code != 202:
+                    response.raise_for_status()
+            except Exception as e:
+                # Log error but continue polling
+                print(f"Error during polling: {str(e)}")
         
             time.sleep(interval)
         
@@ -342,9 +377,23 @@ def run_queries(questions_list):
         progress_bar.progress(progress)
         status_text.text(f"Processing question {i+1}/{total_questions}: {question}")
 
+        # Try to refresh token every 5 questions
+        if i > 0 and i % 5 == 0:
+            try:
+                client.refresh_session(username, password)
+            except:
+                pass  # Continue even if refresh fails
+
         try:
-            # Submit question
-            question_id = client.submit_question(question)
+            # Submit question with retry logic
+            try:
+                question_id = client.submit_question(question)
+            except Exception as submit_error:
+                # Try refreshing the session once if there's an error
+                if client.refresh_session(username, password):
+                    question_id = client.submit_question(question)
+                else:
+                    raise submit_error
             
             # Poll for answer with timing information (will timeout after 58 seconds)
             result, first_response_time, total_response_time = client.poll_answer(question_id)
@@ -399,8 +448,17 @@ def run_queries(questions_list):
                 ""   # Answer Accuracy
             ]
             
+            # Try to refresh the session after a timeout
+            try:
+                client.refresh_session(username, password)
+            except:
+                pass  # Continue even if refresh fails
+            
         except Exception as e:
+            # Get detailed error information
+            error_details = traceback.format_exc()
             st.error(f"Error processing question {i+1}: {str(e)}")
+            st.code(error_details, language="python")
             
             # Add error to DataFrame with empty assessment columns
             results_df.loc[len(results_df)] = [
@@ -416,6 +474,12 @@ def run_queries(questions_list):
                 "Fail",  # Auto-fill as fail since there was an error
                 ""   # Answer Accuracy
             ]
+            
+            # Try to refresh the session after an error
+            try:
+                client.refresh_session(username, password)
+            except:
+                pass  # Continue even if refresh fails
 
         # Delay before next question
         if i < total_questions - 1:
